@@ -1,0 +1,6 @@
+schema_version: 1
+key: product_owner
+name: 产品经理
+responsibility: 按需求、验收条件和测试结果确认功能目标是否达成。
+implementation_scope: acceptance_only
+

@@ -1,0 +1,6 @@
+schema_version: 1
+key: architect
+name: 架构师
+responsibility: 定义系统边界、技术方案、组件关系、关键接口与非功能约束。
+implementation_scope: design_only
+

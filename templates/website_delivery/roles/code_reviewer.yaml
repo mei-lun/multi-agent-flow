@@ -1,0 +1,6 @@
+schema_version: 1
+key: code_reviewer
+name: 代码评审员
+responsibility: 审查正确性、安全性、可维护性、架构符合性和复用来源。
+implementation_scope: review_only
+

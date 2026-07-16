@@ -1,0 +1,6 @@
+schema_version: 1
+key: tester
+name: 测试人员
+responsibility: 依据需求与验收条件设计并执行测试，报告缺陷和回归结果。
+implementation_scope: tests_and_reports
+

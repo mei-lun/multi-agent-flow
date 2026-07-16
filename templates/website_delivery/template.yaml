@@ -1,0 +1,8 @@
+schema_version: 1
+key: website_delivery
+name: 网站开发交付
+workflow: workflow.yaml
+roles_dir: roles
+artifact_schemas_dir: artifact_schemas
+rubrics_dir: rubrics
+

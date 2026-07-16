@@ -1,0 +1,6 @@
+schema_version: 1
+key: developer
+name: 开发者
+responsibility: 在已批准的架构和代码骨架内完成业务实现及开发者测试。
+implementation_scope: assigned_modules
+

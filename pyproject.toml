@@ -1,0 +1,20 @@
+[project]
+name = "multi-agent-flow"
+version = "0.0.0"
+description = "A lightweight role- and skill-constrained multi-agent workflow platform"
+requires-python = ">=3.11"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = [
+  "apps/server/src",
+  "apps/runner/src",
+  "packages/contracts_py/src",
+  "packages/domain/src",
+  "packages/policy/src",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+

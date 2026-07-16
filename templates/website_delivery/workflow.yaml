@@ -1,0 +1,36 @@
+schema_version: 1
+key: website_delivery_v1
+entry: requirements_analysis
+nodes:
+  - id: requirements_analysis
+    role: requirements_analyst
+    output: requirements_analysis
+  - id: architecture_design
+    role: architect
+    needs: [requirements_analysis]
+    output: system_design
+  - id: codebase_design
+    role: codebase_designer
+    needs: [architecture_design]
+    output: codebase_skeleton
+  - id: implementation
+    role: developer
+    needs: [codebase_design]
+    output: implementation_result
+  - id: code_review
+    role: code_reviewer
+    needs: [implementation]
+    output: code_review_report
+  - id: testing
+    role: tester
+    needs: [implementation]
+    output: test_report
+  - id: acceptance
+    role: product_owner
+    needs: [code_review, testing]
+    output: acceptance_report
+  - id: final_review
+    kind: human_gate
+    needs: [acceptance]
+    action: approve_pull_request_merge
+

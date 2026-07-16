@@ -1,0 +1,6 @@
+schema_version: 1
+key: codebase_designer
+name: 开发专家
+responsibility: 创建目录、文件、公共接口和代码骨架，控制代码结构方向。
+implementation_scope: skeleton_without_business_implementation
+

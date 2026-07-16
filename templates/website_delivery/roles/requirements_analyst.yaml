@@ -1,0 +1,6 @@
+schema_version: 1
+key: requirements_analyst
+name: 需求分析师
+responsibility: 将原始需求转化为可追踪、可验收的需求分析。
+implementation_scope: documents_only
+
