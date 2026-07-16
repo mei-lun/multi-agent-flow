@@ -1,0 +1,20 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "maf/event-v1",
+  "type": "object",
+  "required": ["schema_version", "event_id", "event_type", "node_id", "task_id", "based_on_control_commit", "occurred_at", "payload"],
+  "properties": {
+    "schema_version": {"const": 1},
+    "event_id": {"type": "string", "minLength": 16},
+    "event_type": {"enum": ["NODE_REGISTERED", "NODE_UPDATED", "CLAIM_REQUESTED", "PROGRESS_REPORTED", "BLOCKED_REPORTED", "SUBMISSION_CREATED", "WORK_ABANDONED"]},
+    "node_id": {"type": "string"},
+    "task_id": {"type": ["string", "null"]},
+    "assignment_id": {"type": ["string", "null"]},
+    "assignment_epoch": {"type": ["integer", "null"], "minimum": 1},
+    "based_on_control_commit": {"type": "string", "minLength": 7},
+    "occurred_at": {"type": "string", "format": "date-time"},
+    "payload": {"type": "object"}
+  },
+  "additionalProperties": false
+}
+

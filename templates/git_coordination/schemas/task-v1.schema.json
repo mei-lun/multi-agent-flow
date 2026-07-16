@@ -1,0 +1,20 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "maf/task-v1",
+  "type": "object",
+  "required": ["schema_version", "task_id", "title", "status", "requirements", "dependencies", "assignment", "progress", "delivery", "version"],
+  "properties": {
+    "schema_version": {"const": 1},
+    "task_id": {"type": "string", "pattern": "^[A-Z][A-Z0-9_-]+-[0-9]+$"},
+    "title": {"type": "string", "minLength": 1},
+    "status": {"enum": ["PLANNED", "READY", "ASSIGNED", "IN_PROGRESS", "BLOCKED", "SUBMITTED", "REVIEWING", "REWORK_REQUIRED", "LEASE_EXPIRED", "DONE", "FAILED", "CANCELLED"]},
+    "requirements": {"type": "object"},
+    "dependencies": {"type": "array", "items": {"type": "string"}},
+    "assignment": {"type": ["object", "null"]},
+    "progress": {"type": "object"},
+    "delivery": {"type": "object"},
+    "version": {"type": "integer", "minimum": 1}
+  },
+  "additionalProperties": false
+}
+

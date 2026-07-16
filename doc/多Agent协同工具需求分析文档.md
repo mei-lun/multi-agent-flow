@@ -38,7 +38,7 @@
 | 技术原则 | 轻量、单机优先 | SQLite、LangGraph SQLite Checkpointer、本地 ArtifactStore、内嵌组件 |
 | 部署 | 单组织私有部署 | 第一版不实现共享多租户运营，但领域对象保留组织边界 |
 | 执行 | Docker Runner | 每个 Agent Attempt 在隔离容器中执行 |
-| 后续扩展 | 多台机器分布式执行 | Scheduler 与 Runner 必须通过队列、租约和持久化工件解耦 |
+| 后续扩展 | 多台机器分布式执行 | Scheduler 与节点通过 Git control/events/task branches 解耦，不自建节点 HTTP |
 | 模型 | Codex、GLM、DeepSeek、MiniMax、Kimi Code | 需要统一 Model Gateway 和可插拔 Provider Adapter |
 | 模型凭据 | 用户配置中转/API 地址与 Key | 需要连接管理、密钥存储、能力探测和角色级绑定 |
 | 代码仓库 | GitHub、本地 Git | 需要统一 Repository Adapter；两种仓库的评审实现不同 |
@@ -165,12 +165,12 @@ flowchart TB
 
 ### 3.3 单机 MVP 与多机演进
 
-MVP 可以把控制面、队列、数据库和一个 Docker Runner 部署在同一台机器上，但模块之间仍按分布式边界设计：
+MVP 可以把控制面、数据库、Git 工作副本和一个 Docker Runner 部署在同一台机器上，但模块之间仍按 Git 分布式边界设计：
 
 ```text
-MVP：Control Plane + Queue + DB + Artifact Store + Docker Runner（同机）
+MVP：Control Plane + DB Projection + Git Repository + Docker Runner（同机）
 
-演进：Control Plane + Queue + DB + Artifact Store
+演进：Central Scheduler + GitHub + DB Projection
                          ├── Runner Node A（编码任务）
                          ├── Runner Node B（浏览器测试）
                          └── Runner Node C（文档/分析任务）
@@ -178,11 +178,11 @@ MVP：Control Plane + Queue + DB + Artifact Store + Docker Runner（同机）
 
 必须从 MVP 开始满足：
 
-- Runner 通过注册和心跳加入，不写死本机地址；
-- Task 通过队列或调度 API 领取，不通过内存函数调用绑定；
-- Artifact、Patch 和日志先写持久化存储，不只保留在 Runner 本地；
+- 节点通过自己的 Git 事件分支注册，不写死本机地址；
+- Task 由中央写入 `maf/control`，节点用 Claim 事件申请，不通过 HTTP 或内存函数绑定；
+- 代码、文档、Patch 和脱敏报告写任务分支；高频日志留节点本地；
 - Runner 本地目录可被销毁，任务仍可重建或恢复；
-- Scheduler 通过租约确认 Attempt 是否仍由某 Runner 执行；
+- Scheduler 通过 `assignment_id + assignment_epoch` 确认当前执行者；
 - 不同 Runner 可以具有不同标签和能力，例如 `code`、`browser`、`gpu`、`high-memory`；
 - Git 协作使用分支、commit 和 PR，不共享可并发写入的同一工作目录。
 
@@ -910,32 +910,32 @@ sequenceDiagram
     end
 ```
 
-### 12.6 租约与多机 Runner
+### 12.6 Git 认领、进度与多机 Runner
 
 Task 派发包含能力要求，例如：
 
 ```text
-required_runner_labels: [docker, code, git]
+required_capabilities: [docker, code, git]
 resource_profile: standard-4c-8g
 workspace_mode: git-worktree
 network_policy: approved-internet
 timeout: 45m
 ```
 
-Runner Manager 选择满足标签且容量足够的节点。领取后创建租约：
+节点 fetch control 后提交 Claim 事件，中央在合法申请中选择满足能力且容量足够的节点：
 
-- 租约绑定 Attempt 和 Runner ID；
-- Runner 周期性心跳；
-- Scheduler 不因一次心跳延迟立即重复派发；
-- 租约确认过期后，将 Attempt 标记为 Lost；
-- 如果不存在未确认副作用，可创建恢复 Attempt；
-- 若 Git push/PR 等副作用状态不明，先由 Repository Gateway 核对。
+- 接受分配时写 `assignment_id`、`assignment_epoch`、owner 和 expires_at；
+- 节点看到 control 确认后才开始，周期提交结构化进度事件；
+- Scheduler 不因一次进度延迟立即重复派发，先等待宽限并检查任务分支提交；
+- 超时后写 LEASE_EXPIRED；重新分配时 epoch 递增；
+- 旧 epoch 结果隔离，不能覆盖当前权威任务，但旧分支可供人工挑选；
+- 若 push/PR 等副作用状态不明，先由 Repository Gateway 核对。
 
 ### 12.7 恢复策略
 
-- Scheduler 重启：从数据库加载非终态 Run；
-- Queue 重复消息：按 Attempt ID 和幂等键去重；
-- Runner 宕机：保留已上传 Artifact，清理/重建临时工作区；
+- Scheduler 重启：fetch control/node refs，从投影水位重放 Git 事件后加载非终态 Run；
+- Git 重复事件：按 event_id 和 assignment epoch 去重；
+- Runner 宕机：保留已 push 任务分支，清理/重建临时工作区；
 - 模型调用结果已记录：不重复调用；
 - Tool 副作用结果未知：进入核对状态；
 - 验证中断：重新运行确定性验证器，保留旧执行记录；
@@ -1982,7 +1982,7 @@ Runner 心跳中断
 |---|---|---|
 | 用户 → 控制面 | 配置、文件、URL | 认证、RBAC、校验、扫描 |
 | 模型 → Agent Runtime | 文本、Tool call、参数 | schema、步骤限制、Tool allowlist |
-| Runner → 控制面 | 状态、提交、日志 | 机器身份、租约、幂等、hash |
+| Node → GitHub → 控制面 | Claim、进度、问题、提交 | Git 身份、Schema、event_id、assignment epoch、commit hash |
 | Tool/MCP → 平台 | 返回数据、外部副作用 | Gateway、超时、脱敏、审计 |
 | 外网代码 → 工作区 | 恶意代码、漏洞、密钥 | 隔离、来源、固定版本、扫描、人工评审 |
 | Docker → 宿主机 | 逃逸、资源耗尽 | 非特权、最小挂载、资源限制、更新 |

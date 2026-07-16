@@ -1,0 +1,12 @@
+schema_version: 1
+project_id: replace-with-project-id
+control_branch: maf/control
+default_branch: main
+coordination_mode: git_single_writer
+task_schema: task-v1
+node_schema: node-v1
+event_schema: event-v1
+progress_interval_minutes: 15
+assignment_timeout_minutes: 60
+assignment_grace_minutes: 15
+

@@ -12,9 +12,11 @@ pythonpath = [
   "packages/contracts_py/src",
   "packages/domain/src",
   "packages/policy/src",
+  "packages/provider_adapters/src",
+  "packages/tool_adapters/src",
+  "packages/repository_adapters/src",
 ]
 
 [tool.ruff]
 line-length = 100
 target-version = "py311"
-

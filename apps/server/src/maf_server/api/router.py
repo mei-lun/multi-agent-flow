@@ -1,6 +1,6 @@
-"""Top-level API router registration.
+"""顶层 Web API Router 注册。
 
-Public routes use /api/v1. Runner, model, tool, and artifact execution routes
-use /internal/v1 and require machine or Attempt tokens.
+公共业务路由使用 `/api/v1`。分布式节点没有 `/internal/v1` HTTP 路由，只通过 Git refs 和
+`.maf` 文件契约参与协作。
 """
 
