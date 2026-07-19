@@ -10,8 +10,8 @@
 ## 禁止改动
 - 未列出的文件、接口、数据库表、API 路径和 Git Schema。
 ## 验收标准
-- [ ] 启动后 PRAGMA 值符合设计。
-- [ ] 业务库与 checkpoint 库路径不同。
-- [ ] 并发短写测试不产生未处理的 database locked。
+- [x] 启动后 PRAGMA 值符合设计。
+- [x] 业务库与 checkpoint 库路径不同。
+- [x] 并发短写测试不产生未处理的 database locked。
 ## 不包含
 - 业务表。

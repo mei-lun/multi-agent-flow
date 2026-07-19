@@ -15,10 +15,9 @@ class ProviderAdapter(Protocol):
     async def invoke(self, connection: dict[str, Any], model_name: str, request: UnifiedModelRequest) -> UnifiedModelResponse:
         """执行并归一化一次调用；权限、预算和 fallback 不属于 Adapter。"""
         ...
-    async def stream(self, connection: dict[str, Any], model_name: str, request: UnifiedModelRequest) -> AsyncIterator[dict[str, Any]]:
+    def stream(self, connection: dict[str, Any], model_name: str, request: UnifiedModelRequest) -> AsyncIterator[dict[str, Any]]:
         """输出规范化流增量，取消时关闭底层连接。"""
         ...
     def normalize_error(self, error: Exception) -> dict[str, Any]:
         """转换稳定错误码/retryable/category 并移除敏感信息。"""
         ...
-

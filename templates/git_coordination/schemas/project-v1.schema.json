@@ -1,0 +1,29 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "maf/project-v1",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "project_id",
+    "control_branch",
+    "default_branch",
+    "coordination_mode",
+    "task_schema",
+    "node_schema",
+    "event_schema"
+  ],
+  "properties": {
+    "schema_version": {"const": 1},
+    "project_id": {"type": "string", "minLength": 1},
+    "control_branch": {"type": "string", "const": "maf/control"},
+    "default_branch": {"type": "string", "minLength": 1},
+    "coordination_mode": {"enum": ["git_single_writer"]},
+    "task_schema": {"type": "string", "pattern": "^task-v[0-9]+$"},
+    "node_schema": {"type": "string", "pattern": "^node-v[0-9]+$"},
+    "event_schema": {"type": "string", "pattern": "^event-v[0-9]+$"},
+    "progress_interval_minutes": {"type": "integer", "minimum": 1},
+    "assignment_timeout_minutes": {"type": "integer", "minimum": 1},
+    "assignment_grace_minutes": {"type": "integer", "minimum": 0}
+  },
+  "additionalProperties": false
+}

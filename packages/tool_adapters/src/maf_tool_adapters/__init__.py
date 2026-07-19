@@ -1,6 +1,11 @@
-"""Tool Adapter 公共接口包。"""
+"""Tool Adapter 公共接口包。
 
-from .base import ToolAdapter
+TASK-048 扩展：
+- ``base`` 模块定义 ``ToolAdapter`` Protocol 与 ``ToolMetadata`` dataclass。
+- ``echo`` 模块提供 ``EchoToolAdapter`` 测试用实现。
+"""
 
-__all__ = ["ToolAdapter"]
+from .base import ToolAdapter, ToolMetadata
+from .echo import EchoToolAdapter
 
+__all__ = ["EchoToolAdapter", "ToolAdapter", "ToolMetadata"]

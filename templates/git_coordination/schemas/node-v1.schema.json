@@ -2,17 +2,49 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "maf/node-v1",
   "type": "object",
-  "required": ["schema_version", "node_id", "display_name", "git_identity", "capabilities", "capacity", "status", "version"],
+  "required": [
+    "schema_version",
+    "node_id",
+    "display_name",
+    "git_identity",
+    "capabilities",
+    "capacity",
+    "status",
+    "version"
+  ],
   "properties": {
     "schema_version": {"const": 1},
     "node_id": {"type": "string", "pattern": "^node-[0-9a-f-]+$"},
     "display_name": {"type": "string", "minLength": 1},
-    "git_identity": {"type": "object"},
-    "capabilities": {"type": "array", "items": {"type": "string"}, "uniqueItems": true},
+    "git_identity": {
+      "type": "object",
+      "required": ["name", "email"],
+      "properties": {
+        "name": {"type": "string", "minLength": 1},
+        "email": {"type": "string", "minLength": 1}
+      },
+      "additionalProperties": false
+    },
+    "capabilities": {
+      "type": "array",
+      "items": {"type": "string"},
+      "uniqueItems": true
+    },
+    "model_aliases": {
+      "type": "array",
+      "items": {"type": "string"},
+      "uniqueItems": true
+    },
+    "docker_profiles": {
+      "type": "array",
+      "items": {"type": "string"},
+      "uniqueItems": true
+    },
     "capacity": {"type": "integer", "minimum": 1},
     "status": {"enum": ["ACTIVE", "DRAINING", "OFFLINE", "QUARANTINED"]},
-    "version": {"type": "integer", "minimum": 1}
+    "software_version": {"type": "string", "minLength": 1},
+    "version": {"type": "integer", "minimum": 1},
+    "generated_at": {"type": "string", "format": "date-time"}
   },
   "additionalProperties": false
 }
-

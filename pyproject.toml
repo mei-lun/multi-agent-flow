@@ -1,8 +1,38 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
 [project]
 name = "multi-agent-flow"
 version = "0.0.0"
 description = "A lightweight role- and skill-constrained multi-agent workflow platform"
 requires-python = ">=3.11"
+dependencies = [
+  "fastapi>=0.110",
+  "uvicorn[standard]>=0.27",
+  "pydantic>=2.6",
+  "pydantic-settings>=2.2",
+  "structlog>=24.1",
+  "sqlalchemy>=2.0",
+  "aiosqlite>=0.19",
+  "alembic>=1.13",
+  "langgraph>=0.2",
+  "langgraph-checkpoint-sqlite>=2.0",
+  "litellm>=1.40",
+  "casbin>=1.34",
+  "httpx>=0.27",
+  "keyring>=24.3",
+  "cryptography>=42.0",
+  "docker>=7.0",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8.0",
+  "pytest-asyncio>=0.23",
+  "ruff>=0.3",
+  "mypy>=1.9",
+]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
@@ -20,3 +50,33 @@ pythonpath = [
 [tool.ruff]
 line-length = 100
 target-version = "py311"
+
+[tool.ruff.lint]
+# 默认启用 Pyflakes (F) 与 pycodestyle (E/W)。当前阶段占位 Protocol 文件大量
+# 使用 `from .schemas import *`，schemas.py 仍是 TASK-001 留下的空壳；
+# 待 schemas 在 TASK-005+ 落地后逐步收紧以下忽略项。
+ignore = [
+  "F401",  # imported but unused —— 占位文件为后续实现预留的类型导入
+  "F403",  # `from x import *` used —— 占位 Protocol 文件依赖星号导入
+  "F405",  # may be undefined from star imports —— 与 F403 同源
+]
+
+[tool.ruff.lint.per-file-ignores]
+# Tests intentionally contain descriptive helper variables and compact list
+# comprehensions; keep production lint strict without making the verification
+# command fail on test-only naming/fixture patterns.
+"tests/**/*.py" = ["E741", "F541", "F841"]
+
+[tool.mypy]
+python_version = "3.11"
+ignore_missing_imports = true
+follow_imports = "silent"
+# 占位 Protocol 方法以 ``...`` 表示空实现并标注返回类型；待具体实现落地后可移除该豁免。
+disable_error_code = ["empty-body"]
+
+[tool.setuptools]
+# Monorepo src 布局：实际 Python 包位于 apps/*/src/maf_* 与 packages/*/src/maf_*。
+# 根 pyproject.toml 仅作为元包声明共享运行时与开发依赖；包导入通过 pytest 的
+# pythonpath 配置和各 app/package 的独立构建路径发现，不在根安装 Python 包。
+# 显式禁用 setuptools 自动发现，避免误把 apps/、packages/ 等顶层目录安装为包。
+py-modules = []

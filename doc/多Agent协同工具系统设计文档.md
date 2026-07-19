@@ -1,4 +1,4 @@
-﻿# 多 Agent 协同工具系统设计文档
+# 多 Agent 协同工具系统设计文档
 
 **文档版本：** V1.1 Lightweight Draft  
 **编写日期：** 2026-07-16  
@@ -172,15 +172,18 @@ flowchart TB
     API --> LG["LangGraph + SqliteSaver"]
     API --> LLM["LiteLLM SDK"]
     API --> CAS["PyCasbin + Validators"]
-    API --> RW["Runner HTTP Long Poll"]
+    API --> GH["GitHub / Local Git"]
+    GH --> C["maf/control 单写"]
+    C --> RW["Runner Node fetch/push"]
     RW --> DOCKER["Docker Engine"]
     DOCKER --> C1["Attempt Container"]
-    C1 --> API
+    C1 --> RW
     API --> SEC["OS Keyring / Encrypted Secret File"]
     API --> MODEL["User Model Endpoints"]
     API --> MCP["MCP / HTTP Tools"]
-    API --> GH["GitHub / Local Git"]
 ```
+
+跨机器协调只使用 Git pull/push，不自建节点 HTTP。详见 [GitHub 分布式协作协议](./GitHub分布式协作协议.md)。
 
 ### 3.2 进程与本地组件职责
 
@@ -253,7 +256,7 @@ multi-agent-flow/
 ├── apps/
 │   ├── web/                         # React 控制台
 │   ├── server/                      # FastAPI + Scheduler + 内嵌 Gateway
-│   └── runner/                      # Docker Runner，HTTP 长轮询
+│   └── runner/                      # Docker Runner，fetch control/claim/submit
 ├── packages/
 │   ├── contracts_py/                # Python Pydantic 跨进程契约
 │   ├── contracts_ts/                # OpenAPI 生成的 TypeScript DTO
@@ -995,9 +998,9 @@ SQLite 使用 `TEXT` 保存规范化 JSON，并增加 `CHECK(json_valid(field))`
 | supported_images | json | digest allowlist |
 | total_cpu/total_memory_mb/total_disk_mb | int/bigint | |
 | max_concurrency/current_concurrency | int | |
-| host_task_queue | text | |
+| host_node_id | text | |
 | agent_version/docker_version | text | |
-| last_heartbeat_at | datetime | |
+| last_progress_at | datetime | |
 | registered_at | datetime | |
 
 #### scheduler_wakeups
@@ -3315,11 +3318,11 @@ async def execute_agent_node(self, node):
     self.state.mark_assigned(node.key, attempt)
     await self.emit("task.assigned", attempt)
 
-    await runner_job_repo.enqueue(
+    await git_coordination.publish_task(
+        task_id=attempt.task_id,
         attempt_id=attempt.id,
-        labels=attempt.required_labels,
-        payload=attempt.dispatch_envelope,
-        available_at=now(),
+        dispatch_envelope=attempt.dispatch_envelope,
+        based_on_control_commit=self.state.control_commit,
     )
     resume_data = interrupt({
         "kind": "RUNNER_RESULT",
@@ -3342,43 +3345,89 @@ async def execute_agent_node(self, node):
     return NodeResult.from_validation(result, validation)
 ```
 
-### 25.11 Runner Job 循环
+### 25.11 Runner 节点主循环
+
+> 节点不通过 HTTP 向中央注册或领取任务。节点 fetch `maf/control` 发现 READY 任务，向 `maf/node/<node-id>` 追加 `CLAIM_REQUESTED` 事件申请，中央调度器接受后写 `ASSIGNED` 并生成 `assignment_id` 与递增 `assignment_epoch`。进度通过 `PROGRESS` 事件回报，提交通过 `SUBMISSION_CREATED` 事件回报。详见 [GitHub 分布式协作协议](./GitHub分布式协作协议.md) 第 6、7、8、9 节。
 
 ```python
 async def runner_main():
-    session = await server.register_runner(local_capabilities())
-    while not shutdown_requested():
-        job = await server.claim_job(
-            runner_id=session.runner_id,
-            labels=session.labels,
-            wait_seconds=25,
-        )
-        if job is None:
-            continue
-        result = await execute_runner_job(job, session)
-        await server.submit_job_result(job.id, job.lease_token, result)
+    # 节点首次启动生成持久 node-id，并向 maf/node/<node-id> 注册身份与能力
+    node_manifest = local_manifest()
+    await git_client.register_node(node_manifest)
 
-async def execute_runner_job(job, session) -> AttemptResult:
-    envelope = job.envelope
-    await server.heartbeat(job.id, job.lease_token, {"phase": "PREPARING"})
+    while not shutdown_requested():
+        # 节点周期性 fetch maf/control，按能力标签匹配 READY 任务
+        control = await git_client.fetch_control()
+        candidate = control.find_claimable_task(
+            node_id=node_manifest.node_id,
+            labels=node_manifest.labels,
+        )
+        if candidate is None:
+            await asyncio.sleep(POLL_INTERVAL_SECONDS)
+            continue
+
+        # 向 maf/node/<node-id> 追加 CLAIM_REQUESTED，等待中央写 ASSIGNED
+        assignment = await git_client.request_and_wait_for_assignment(
+            task_id=candidate.task_id,
+            attempt_id=candidate.attempt_id,
+            based_on_control_commit=control.commit,
+        )
+        if assignment is None:
+            continue
+
+        result = await execute_runner_job(assignment, node_manifest)
+        # 向 maf/node/<node-id> 追加 SUBMISSION_CREATED，由中央更新 SUBMITTED/REVIEWING
+        await git_client.append_event(
+            Event.submission_created(
+                task_id=assignment.task_id,
+                attempt_id=assignment.attempt_id,
+                assignment_id=assignment.assignment_id,
+                assignment_epoch=assignment.assignment_epoch,
+                head=result.head,
+                base=result.base,
+                based_on_control_commit=assignment.based_on_control_commit,
+            )
+        )
+
+async def execute_runner_job(assignment, node_manifest) -> AttemptResult:
+    envelope = assignment.dispatch_envelope
+    # 通过向 maf/node/<node-id> 追加 PROGRESS 事件代替 HTTP 心跳
+    progress_reporter = GitProgressReporter(git_client, assignment)
+    await progress_reporter.report({"phase": "PREPARING"})
+
+    # 节点本地签发与 assignment 绑定的短期 capability token，不向中央申请
+    token = capability_token_issuer.issue(
+        attempt_id=envelope.attempt_id,
+        assignment_id=assignment.assignment_id,
+        assignment_epoch=assignment.assignment_epoch,
+        role=envelope.role_version_id,
+        tool_scope=envelope.allowed_tools,
+        resource_scope=envelope.resource_scope,
+        expires_at=assignment.expires_at,
+    )
     profile = docker_profiles.resolve(envelope.resource_profile)
     workspace = None
     container = None
 
     try:
         workspace = await workspace_manager.prepare(envelope.workspace)
-        token = await server.issue_attempt_token(envelope.attempt_id, job.lease_token)
         container = await docker_manager.create(
             profile=profile,
             workspace=workspace,
             envelope=envelope,
             token=token,
         )
-        await server.mark_attempt_running(envelope.attempt_id, job.lease_token, container.id)
+        await progress_reporter.report({
+            "phase": "IN_PROGRESS",
+            "container_id": container.id,
+        })
 
         async for progress in docker_manager.run_and_stream(container):
-            await server.heartbeat(job.id, job.lease_token, progress.safe_summary())
-            if await server.is_job_cancelled(job.id, job.lease_token):
+            await progress_reporter.report(progress.safe_summary())
+            # 通过 fetch control 检测 CANCELLED 或 epoch 是否已被递增
+            control = await git_client.fetch_control()
+            task_state = control.task_state(assignment.task_id)
+            if task_state.is_cancelled or task_state.assignment_epoch > assignment.assignment_epoch:
                 await docker_manager.stop(container, grace_seconds=10)
                 return AttemptResult.cancelled(envelope.attempt_id)
 
@@ -3386,12 +3435,20 @@ async def execute_runner_job(job, session) -> AttemptResult:
         if not runtime_result.has_final_submission:
             return AttemptResult.failed("RUNTIME_EXITED_WITHOUT_SUBMISSION")
 
-        assert await server.verify_active_lease(job.id, job.lease_token)
+        # push 任务分支并校验 epoch 仍属于本节点；旧 epoch 会被拒绝
+        pushed = await git_client.push_task_branch(
+            task_id=assignment.task_id,
+            assignment_epoch=assignment.assignment_epoch,
+            head=runtime_result.head,
+            base=runtime_result.base,
+        )
+        if not pushed:
+            return AttemptResult.failed("ASSIGNMENT_EPOCH_SUPERSEDED")
         return runtime_result.to_attempt_result()
     except DockerInfrastructureError as exc:
         return AttemptResult.failed("RUNNER_INFRASTRUCTURE_ERROR", retryable=True)
     finally:
-        await server.revoke_attempt_token(envelope.attempt_id)
+        capability_token_issuer.revoke(token)
         if container:
             await docker_manager.remove(container)
         if workspace:
@@ -3457,8 +3514,8 @@ async def run_agent(envelope):
 ### 25.13 Skill 读取
 
 ```python
-async def read_skill(attempt_token, skill_version_id, relative_path):
-    claims = verify_attempt_token(attempt_token)
+async def read_skill(capability_token, skill_version_id, relative_path):
+    claims = verify_capability_token(capability_token)
     snapshot = snapshot_repo.get(claims.run_id)
     role = snapshot.roles[claims.role_version_id]
     binding = role.skill_bindings.get(skill_version_id)
@@ -3477,7 +3534,7 @@ async def read_skill(attempt_token, skill_version_id, relative_path):
 
 ```python
 async def call_tool(token, tool_key, tool_version, arguments, call_key):
-    claims = verify_attempt_token(token)
+    claims = verify_capability_token(token)
     attempt = attempt_repo.require_active(claims.attempt_id)
     tool = tool_repo.get_published(tool_key, tool_version)
     validate_json(tool.input_schema, arguments)
@@ -3524,7 +3581,7 @@ async def call_tool(token, tool_key, tool_version, arguments, call_key):
 
 ```python
 async def invoke_model(token, request):
-    claims = verify_attempt_token(token)
+    claims = verify_capability_token(token)
     policy = snapshot_repo.get_model_policy(claims.run_id, request.model_policy_id)
     budget_guard.require_available(claims.run_id, claims.attempt_id, request)
 
@@ -3566,7 +3623,7 @@ async def invoke_model(token, request):
 
 ```python
 async def finalize_artifact_submission(token, request):
-    claims = verify_attempt_token(token)
+    claims = verify_capability_token(token)
     attempt = attempt_repo.require_active_with_lease(claims.attempt_id, claims.jti)
     contract = snapshot_repo.get_output_contract(claims.run_id, claims.task_id)
     if request.artifact_type not in contract.allowed_types:
@@ -3676,7 +3733,7 @@ async def deliver_human_signal(event):
 
 ```python
 async def evaluate_external_resource(token, candidate):
-    claims = verify_attempt_token(token)
+    claims = verify_capability_token(token)
     decision = await policy_engine.evaluate(
         subject=claims,
         action="external_resource.fetch",
@@ -3842,19 +3899,28 @@ async def cancel_run(command):
     async with run_lock(command.run_id), sqlite_begin_immediate():
         if command_repo.exists(command.command_id): return
         run_repo.mark_cancelling(command.run_id, command.reason)
-        runner_job_repo.cancel_for_run(command.run_id)
-        attempt_token_repo.revoke_for_run(command.run_id)
+        await git_coordination.cancel_tasks_for_run(command.run_id)
+        capability_token_repo.revoke_for_run(command.run_id)
         command_repo.record(command.command_id)
     await scheduler_service.resume_run(command.run_id, {"kind": "CANCEL"})
 ```
 
 ### 25.26 Runner 失联恢复
 
+> 失联判定依据：`maf/control` 中任务 `last_progress_at` 超过 assignment 超时阈值，且 `maf/node/<node-id>` 分支无新事件。调度器递增 `assignment_epoch` 隔离旧节点，重新分配前先检查 `maf/task/<task-id>/e<epoch>-<node-id>` 是否有可恢复提交。详见 [GitHub 分布式协作协议](./GitHub分布式协作协议.md) 第 8、11 节。
+
 ```python
-async def handle_runner_lost(attempt, last_heartbeat):
+async def handle_runner_lost(attempt, last_progress_event):
     attempt_repo.mark_lost(attempt.id)
+    # 安全拉取旧节点任务分支，保留可恢复提交作为恢复材料
+    recovery_material = await git_coordination.fetch_task_branch_safe(
+        task_id=attempt.task_id,
+        assignment_epoch=attempt.assignment_epoch,
+    )
     side_effects = await side_effect_registry.list_unconfirmed(attempt.id)
     if not side_effects:
+        if recovery_material and recovery_material.has_usable_submission:
+            return RecoveryDecision.reuse_recovered_submission(recovery_material)
         return RecoveryDecision.create_new_attempt(reason="RUNNER_LOST")
 
     reconciliation = []
@@ -3864,6 +3930,8 @@ async def handle_runner_lost(attempt, last_heartbeat):
     if all(r.confirmed_success for r in reconciliation):
         return RecoveryDecision.resume_from_confirmed_results(reconciliation)
     if all(r.confirmed_absent for r in reconciliation):
+        if recovery_material and recovery_material.has_usable_submission:
+            return RecoveryDecision.reuse_recovered_submission(recovery_material)
         return RecoveryDecision.create_new_attempt(reason="SAFE_RETRY")
     item = await inbox_service.create_failure_triage(attempt, reconciliation)
     return RecoveryDecision.waiting_human(item.id)
@@ -3978,7 +4046,7 @@ start
 
 ### 26.2 默认 Runner labels
 
-| 节点 | Queue/Runner 标签 |
+| 节点 | Runner 标签 |
 |---|---|
 | requirements/architecture | `maf-agent-default` / document |
 | blueprint/implementation | `maf-code` / code+git |
@@ -4351,5 +4419,5 @@ React 控制台
 5. Repository Gateway 决定代码副作用，最终 head commit 通过评审后才合主干；
 6. Runner 可以从一台扩展到多台，但所有机器仍共享同一调度、工件和 Git 协议。
 
-按照本设计实施，MVP 可以用 SQLite、server/runner 两个运行进程和本机 Docker 跑通完整网站开发流程。后续可以增加少量远程 Runner；当需要多 server、高并发或高可用时，再替换 PostgreSQL、对象存储和更强调度基础设施，核心领域模型、Runner HTTP 协议和 Artifact 契约无需重写。
+按照本设计实施，MVP 可以用 SQLite、server/runner 两个运行进程和本机 Docker 跑通完整网站开发流程。后续可以增加少量远程 Runner；当需要多 server、高并发或高可用时，再替换 PostgreSQL、对象存储和更强调度基础设施，核心领域模型、Git 协议和 Artifact 契约无需重写。
 

@@ -10,8 +10,8 @@
 ## 禁止改动
 - 未列出的文件、接口、数据库表、API 路径和 Git Schema。
 ## 验收标准
-- [ ] 所有允许/禁止转换有参数化测试。
-- [ ] 节点不能直接设置 DONE、ASSIGNED 或 REVIEWING。
-- [ ] 终态不会退回 IN_PROGRESS。
+- [x] 所有允许/禁止转换有参数化测试。
+- [x] 节点不能直接设置 DONE、ASSIGNED 或 REVIEWING。
+- [x] 终态不会退回 IN_PROGRESS。
 ## 不包含
 - Git 提交。

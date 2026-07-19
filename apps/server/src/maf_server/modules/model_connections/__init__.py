@@ -1,2 +1,1 @@
-"""User-defined relays, model endpoints, credentials, and connectivity tests."""
-
+"""Model connection configuration management (CRUD, no inference)."""

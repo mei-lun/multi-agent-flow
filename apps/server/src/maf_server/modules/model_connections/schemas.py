@@ -1,135 +1,132 @@
-"""模型连接、模型配置、策略和用量查询契约。"""
+"""模型连接配置管理的请求/响应字段定义。
 
-from typing import Any, Literal, NotRequired, TypedDict
+TASK-037 范围：
+- 定义 ``ModelConnectionService`` 对外暴露的 DTO（``ModelConnectionView``、
+  ``CreateModelConnectionRequest``、``UpdateModelConnectionRequest``、``TestResult``）；
+- 定义 provider / credential_type / status 取值常量。
+
+安全约束：
+- ``ModelConnectionView`` 只返回 ``credential_type`` 与不可逆 ``credential_fingerprint``，
+  绝不返回凭据明文或 ``secret_id``；
+- 时间字段为带时区 ISO 8601 字符串。
+"""
+
+from __future__ import annotations
+
+from typing import Literal, TypedDict
+
+# --------------------------------------------------------------------------- #
+# 取值常量
+# --------------------------------------------------------------------------- #
+
+#: 支持的模型供应商。``local`` 表示本地推理端点（如 Ollama）。
+ALLOWED_PROVIDERS: tuple[str, ...] = ("openai", "anthropic", "azure", "local")
+
+#: 支持的凭据类型。
+ALLOWED_CREDENTIAL_TYPES: tuple[str, ...] = (
+    "api_key",
+    "oauth_token",
+    "bearer_token",
+)
+
+#: 连接初始状态：创建后未经过 ``test_connection`` 验证。
+STATUS_UNVERIFIED: str = "UNVERIFIED"
+#: ``test_connection`` 验证通过。
+STATUS_VERIFIED: str = "VERIFIED"
+#: ``test_connection`` 验证失败（凭据不可解析或 URL 非法）。
+STATUS_ERROR: str = "ERROR"
 
 
-class CreateModelConnectionRequest(TypedDict):
-    name: str
-    adapter_type: Literal[
-        "OPENAI_COMPAT_CHAT", "CODEX", "GLM", "DEEPSEEK", "MINIMAX", "KIMI_CODE"
-    ]
-    base_url: str
-    api_key: str
-    request_timeout_ms: int
-    tls_verify: bool
-    idempotency_key: str
+Provider = Literal["openai", "anthropic", "azure", "local"]
+CredentialType = Literal["api_key", "oauth_token", "bearer_token"]
+ConnectionStatus = Literal["UNVERIFIED", "VERIFIED", "ERROR"]
+
+
+# --------------------------------------------------------------------------- #
+# 视图与请求 DTO
+# --------------------------------------------------------------------------- #
 
 
 class ModelConnectionView(TypedDict):
+    """模型连接对外视图，不含凭据明文与 ``secret_id``。
+
+    - ``credential_fingerprint``：不可逆指纹（``sha256(plaintext)[:8] + ".." + plaintext[-4:]``），
+      与 TASK-029/032 的指纹算法一致，用于运维识别与脱敏展示。
+    - ``status``：``UNVERIFIED`` / ``VERIFIED`` / ``ERROR``。
+    - ``version``：乐观锁版本号。
+    """
+
     id: str
     name: str
-    adapter_type: str
-    base_url: str
-    request_timeout_ms: int
-    tls_verify: bool
-    api_key_configured: bool
-    secret_fingerprint_suffix: str | None
-    status: Literal["UNVERIFIED", "READY", "ERROR", "DISABLED"]
+    provider: str
+    model_id: str
+    api_base: str
+    credential_type: str
+    credential_fingerprint: str | None
+    status: str
+    created_by: str
+    created_at: str
+    updated_at: str
     version: int
 
 
-class ConnectionQuery(TypedDict, total=False):
-    cursor: str
-    limit: int
-    status: str
-    adapter_type: str
+class CreateModelConnectionRequest(TypedDict):
+    """创建模型连接请求。
 
+    ``credential_value`` 为明文凭据，仅在本次请求内存中处理，经 SecretService
+    存储后绝不持久化明文。
+    """
 
-class ConnectionPage(TypedDict):
-    items: list[ModelConnectionView]
-    next_cursor: str | None
-    has_more: bool
-
-
-class VerifyConnectionRequest(TypedDict):
-    levels: list[Literal["DNS", "TLS", "AUTH", "CHAT"]]
+    name: str
+    provider: str
+    model_id: str
+    api_base: str
+    credential_type: str
+    credential_value: str
     idempotency_key: str
 
 
-class ProbeCheck(TypedDict):
+class UpdateModelConnectionRequest(TypedDict, total=False):
+    """更新模型连接请求（部分更新）。
+
+    至少提供 ``name`` / ``api_base`` / ``credential_value`` 之一。``expected_version``
+    为必填的乐观锁版本号。``credential_value`` 非空时经 SecretService 轮换凭据。
+    """
+
     name: str
-    status: Literal["PASS", "FAIL", "SKIP"]
-    latency_ms: int | None
+    api_base: str
+    credential_value: str
+    expected_version: int
+    idempotency_key: str
+
+
+class TestResult(TypedDict):
+    """``test_connection`` 返回的验证结果，不含凭据明文。
+
+    - ``ok``：凭据可解析且 URL 格式正确时为 ``True``。
+    - ``status``：验证后连接的新状态（``VERIFIED`` / ``ERROR``）。
+    - ``message``：人类可读说明，不含敏感信息。
+    - ``checked_at``：检查时间（带时区 ISO 8601）。
+    """
+
+    connection_id: str
+    ok: bool
+    status: str
     message: str
-
-
-class ProbeResult(TypedDict):
-    status: Literal["PASS", "PARTIAL", "FAIL"]
-    checks: list[ProbeCheck]
     checked_at: str
 
 
-class RegisterModelRequest(TypedDict):
-    remote_model_name: str
-    display_name: str
-    context_window: int | None
-    input_price_per_million: str | None
-    output_price_per_million: str | None
-    idempotency_key: str
-
-
-class ModelProfileView(TypedDict):
-    id: str
-    connection_id: str
-    remote_model_name: str
-    display_name: str
-    capabilities: dict[str, bool | int | str | None]
-    status: Literal["UNPROBED", "READY", "LIMITED", "ERROR"]
-    version: int
-
-
-class ProbeModelRequest(TypedDict):
-    capabilities: list[Literal["CHAT", "STREAM", "TOOLS", "JSON_SCHEMA", "VISION"]]
-    idempotency_key: str
-
-
-class CreateModelPolicyRequest(TypedDict):
-    name: str
-    primary_model_profile_id: str
-    fallback_model_profile_ids: list[str]
-    max_retries_per_model: int
-    allow_fallback: bool
-    temperature: NotRequired[float]
-    max_output_tokens: NotRequired[int]
-    idempotency_key: str
-
-
-class ModelPolicyView(TypedDict):
-    id: str
-    name: str
-    primary_model_profile_id: str
-    fallback_model_profile_ids: list[str]
-    max_retries_per_model: int
-    allow_fallback: bool
-    version: int
-
-
-class UsageQuery(TypedDict, total=False):
-    project_id: str
-    run_id: str
-    role_version_id: str
-    model_profile_id: str
-    from_time: str
-    to_time: str
-    cursor: str
-    limit: int
-
-
-class ModelUsageItem(TypedDict):
-    model_profile_id: str
-    run_id: str | None
-    input_tokens: int
-    output_tokens: int
-    estimated_cost: str
-    currency: str
-    latency_ms: int
-    status: str
-    occurred_at: str
-
-
-class UsagePage(TypedDict):
-    items: list[ModelUsageItem]
-    next_cursor: str | None
-    has_more: bool
-    totals: dict[str, Any]
-
+__all__ = [
+    "ALLOWED_CREDENTIAL_TYPES",
+    "ALLOWED_PROVIDERS",
+    "ConnectionStatus",
+    "CreateModelConnectionRequest",
+    "CredentialType",
+    "ModelConnectionView",
+    "Provider",
+    "STATUS_ERROR",
+    "STATUS_UNVERIFIED",
+    "STATUS_VERIFIED",
+    "TestResult",
+    "UpdateModelConnectionRequest",
+]

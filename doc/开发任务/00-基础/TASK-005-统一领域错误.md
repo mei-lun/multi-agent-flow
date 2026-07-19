@@ -10,8 +10,8 @@
 ## 禁止改动
 - 未列出的文件、接口、数据库表、API 路径和 Git Schema。
 ## 验收标准
-- [ ] 参数、权限、版本、Git 冲突、外部依赖错误可区分。
-- [ ] API 不返回堆栈，Git EventDecision 返回稳定 reason_code。
-- [ ] 错误类型有单元测试。
+- [x] 参数、权限、版本、Git 冲突、外部依赖错误可区分。
+- [x] API 不返回堆栈，Git EventDecision 返回稳定 reason_code。
+- [x] 错误类型有单元测试。
 ## 不包含
 - 具体业务校验规则。

@@ -10,8 +10,8 @@
 ## 禁止改动
 - 未列出的文件、接口、数据库表、API 路径和 Git Schema。
 ## 验收标准
-- [ ] push 冲突可 fetch/rebase 后用同 event_id 重试。
-- [ ] 节点只能写自己的事件分支。
-- [ ] 事件文件通过 event-v1 Schema。
+- [x] push 冲突可 fetch/rebase 后用同 event_id 重试。
+- [x] 节点只能写自己的事件分支。
+- [x] 事件文件通过 event-v1 Schema。
 ## 不包含
 - 中央接受事件。
