@@ -10,8 +10,8 @@
 ## 禁止改动
 - 未列出的文件、接口、数据库表、API 路径和 Git Schema。
 ## 验收标准
-- [ ] 只有 assignee/管理员可决定。
-- [ ] subject 版本变化返回冲突。
-- [ ] Decision 与关闭 Item 原子提交并唤醒 Scheduler。
+- [x] 只有 assignee/管理员可决定。
+- [x] subject 版本变化返回冲突。
+- [x] Decision 与关闭 Item 原子提交并唤醒 Scheduler。
 ## 不包含
 - 邮件或企业 IM。

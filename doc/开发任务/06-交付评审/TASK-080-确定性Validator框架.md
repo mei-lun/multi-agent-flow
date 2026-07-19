@@ -10,8 +10,8 @@
 ## 禁止改动
 - 未列出的文件、接口、数据库表、API 路径和 Git Schema。
 ## 验收标准
-- [ ] ERROR 不被视为 PASS。
-- [ ] 每个结果包含阻断项、警告和证据引用。
-- [ ] Validator 可按 Artifact/任务类型选择。
+- [x] ERROR 不被视为 PASS。
+- [x] 每个结果包含阻断项、警告和证据引用。
+- [x] Validator 可按 Artifact/任务类型选择。
 ## 不包含
 - Gate 汇总。

@@ -1,16 +1,30 @@
-"""在节点本地请求获授权 Tool 的接口。"""
+"""Runner-side facade for an in-process node-local Tool Gateway."""
 
-from typing import Protocol
-from maf_contracts.tool import *
+from __future__ import annotations
+
+from typing import Any
+
+from maf_contracts.common import ExecutionContext
+from maf_contracts.tool import CancelToolCallRequest, ToolCallRequest, ToolCallResult, ToolListResponse
 
 
-class ToolClient(Protocol):
+class ToolClient:
+    def __init__(self, gateway: Any, context: ExecutionContext) -> None:
+        self._gateway = gateway
+        self._context = dict(context)
+
     async def list_allowed(self) -> ToolListResponse:
-        """从 Role/Task 快照和本地 Tool Registry 求交集；未授权工具不暴露。"""
-        ...
+        return await self._gateway.list_allowed(self._context)
+
     async def call(self, tool_key: str, request: ToolCallRequest) -> ToolCallResult:
-        """经本地 Policy 校验后执行；需中央人工审批的动作先报告 BLOCKED，不跨节点 HTTP 等待。"""
-        ...
+        return await self._gateway.call(self._context, tool_key, request)
+
     async def cancel(self, call_id: str, reason: str) -> None:
-        """请求取消同一 Attempt 的调用；调用不存在或已结束时按幂等成功处理。"""
-        ...
+        await self._gateway.cancel_call(
+            self._context,
+            call_id,
+            CancelToolCallRequest(reason=reason, idempotency_key=f"cancel:{call_id}"),
+        )
+
+
+__all__ = ["ToolClient"]

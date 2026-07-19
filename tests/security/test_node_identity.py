@@ -244,7 +244,8 @@ def _write_event_to_node_branch(
     ).returncode == 0
 
     if not branch_exists:
-        _git(repo, "worktree", "add", "--orphan", "-b", branch, str(wt), env=env)
+        _git(repo, "worktree", "add", "--detach", str(wt), "HEAD", env=env)
+        _git(wt, "switch", "--orphan", branch, env=env)
     else:
         _git(repo, "worktree", "add", str(wt), branch, env=env)
 

@@ -10,8 +10,8 @@
 ## 禁止改动
 - 未列出的文件、接口、数据库表、API 路径和 Git Schema。
 ## 验收标准
-- [ ] 命令先持久化再推进 Scheduler。
-- [ ] 活动节点通过 control 看到取消或新 epoch。
-- [ ] 已终态 Run 不被改写。
+- [x] 命令先持久化再推进 Scheduler。
+- [x] 活动节点通过 control 看到取消或新 epoch。
+- [x] 已终态 Run 不被改写。
 ## 不包含
 - 强制回滚已发生 Git/Tool 副作用。

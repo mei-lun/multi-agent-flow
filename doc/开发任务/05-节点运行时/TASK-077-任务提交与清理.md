@@ -10,8 +10,8 @@
 ## 禁止改动
 - 未列出的文件、接口、数据库表、API 路径和 Git Schema。
 ## 验收标准
-- [ ] push 前再次确认当前 assignment epoch。
-- [ ] Submission 包含 base/head、修改路径、测试、问题和剩余项。
-- [ ] push 失败可重试且不重复事件；旧 epoch 结果不宣称成功。
+- [x] push 前再次确认当前 assignment epoch。
+- [x] Submission 包含 base/head、修改路径、测试、问题和剩余项。
+- [x] push 失败可重试且不重复事件；旧 epoch 结果不宣称成功。
 ## 不包含
 - PR 审核和 DONE 状态。

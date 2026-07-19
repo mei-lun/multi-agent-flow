@@ -53,9 +53,26 @@ from maf_policy.capability import (
     rule_matches,
     seed_default_policies,
 )
+from maf_policy.validators import (
+    validate_budget,
+    validate_parameter_constraints,
+    validate_path,
+    validate_url,
+)
 
 #: ADMIN 角色常量（与 ``maf_policy.KNOWN_ROLES`` 一致）。
 ADMIN_ROLE: str = "ADMIN"
+
+
+def _grant_identity(value: Any) -> str:
+    if isinstance(value, str):
+        return value
+    if isinstance(value, dict):
+        name = value.get("name") or value.get("key")
+        version = value.get("version")
+        if isinstance(name, str) and name:
+            return f"{name}:{version}" if version is not None else name
+    return ""
 
 
 class CapabilityPolicyServiceImpl:
@@ -121,6 +138,10 @@ class CapabilityPolicyServiceImpl:
 
         actor_roles = list(request.get("actor_roles") or [])
 
+        guarded = self._evaluate_execution_guards(request)
+        if guarded is not None:
+            return guarded
+
         # 2. ADMIN 短路放行
         if ADMIN_ROLE in actor_roles:
             return allow_decision(reason=REASON_ADMIN_DEFAULT_ALLOW)
@@ -148,6 +169,10 @@ class CapabilityPolicyServiceImpl:
 
         # 5. 默认拒绝
         return deny_decision(REASON_DEFAULT_DENY)
+
+    async def simulate(self, request: CapabilityRequest) -> CapabilityDecision:
+        """Evaluate without writes or adapter calls, returning reasons/obligations."""
+        return await self.evaluate(request)
 
     async def evaluate_batch(
         self, requests: list[CapabilityRequest]
@@ -305,6 +330,65 @@ class CapabilityPolicyServiceImpl:
         ctx = request.get("context")
         if ctx is not None and not isinstance(ctx, dict):
             return REASON_INVALID_REQUEST
+        return None
+
+    @staticmethod
+    def _evaluate_execution_guards(
+        request: CapabilityRequest,
+    ) -> CapabilityDecision | None:
+        """Fail closed on execution snapshot intersections before RBAC policy.
+
+        The guard is activated whenever execution grant fields are supplied.
+        Administrators therefore cannot widen a Role or Git task grant merely
+        by being the caller of a dry run.
+        """
+        context = request.get("context") or {}
+        if not isinstance(context, dict):
+            return deny_decision(REASON_INVALID_REQUEST)
+        guarded_keys = {
+            "role_grants", "task_grants", "assignment_epoch",
+            "current_assignment_epoch", "constraints", "parameters",
+        }
+        if not guarded_keys.intersection(context):
+            return None
+        role_grants = context.get("role_grants")
+        task_grants = context.get("task_grants")
+        if not isinstance(role_grants, list) or not isinstance(task_grants, list):
+            return deny_decision("EXECUTION_GRANTS_MISSING")
+        requested = str(request.get("capability_name", ""))
+        version = request.get("capability_version")
+        identity = f"{requested}:{version}" if version else requested
+        role_set = {_grant_identity(item) for item in role_grants}
+        task_set = {_grant_identity(item) for item in task_grants}
+        if identity not in role_set or identity not in task_set:
+            return deny_decision("GRANT_INTERSECTION_DENIED")
+        epoch = context.get("assignment_epoch")
+        current_epoch = context.get("current_assignment_epoch")
+        if not isinstance(epoch, int) or epoch < 1 or epoch != current_epoch:
+            return deny_decision("ASSIGNMENT_EPOCH_MISMATCH")
+        constraints = context.get("constraints", {})
+        parameters = context.get("parameters", {})
+        if not isinstance(constraints, dict) or not isinstance(parameters, dict):
+            return deny_decision("PARAMETER_CONSTRAINT_DENIED")
+        path = parameters.get("path")
+        if path is not None and not validate_path(path, constraints.get("allowed_paths", [])):
+            return deny_decision("PATH_CONSTRAINT_DENIED")
+        url = parameters.get("url")
+        if url is not None and not validate_url(
+            url,
+            constraints.get("allowed_hosts", []),
+            allow_private=bool(constraints.get("allow_private_network", False)),
+        ):
+            return deny_decision("URL_CONSTRAINT_DENIED")
+        requested_cost = parameters.get("cost")
+        if requested_cost is not None and not validate_budget(
+            requested_cost, constraints.get("max_cost", "0")
+        ):
+            return deny_decision("BUDGET_CONSTRAINT_DENIED")
+        if not validate_parameter_constraints(
+            parameters, constraints.get("parameters", {})
+        ):
+            return deny_decision("PARAMETER_CONSTRAINT_DENIED")
         return None
 
     @staticmethod

@@ -10,8 +10,8 @@
 ## 禁止改动
 - 未列出的文件、接口、数据库表、API 路径和 Git Schema。
 ## 验收标准
-- [ ] 正常等待节点提交的 Run 不被误判失败。
-- [ ] control/投影/checkpoint 不一致可修复或明确报警。
-- [ ] 重复启动不重复创建 task、review 或 PR。
+- [x] 正常等待节点提交的 Run 不被误判失败。
+- [x] control/投影/checkpoint 不一致可修复或明确报警。
+- [x] 重复启动不重复创建 task、review 或 PR。
 ## 不包含
 - 多 active Scheduler。

@@ -10,8 +10,8 @@
 ## 禁止改动
 - 未列出的文件、接口、数据库表、API 路径和 Git Schema。
 ## 验收标准
-- [ ] 一次返回全部错误和警告。
-- [ ] Skill 声明但 Role 未绑定的 Tool 阻断发布。
-- [ ] 发布时重新校验并计算 content hash。
+- [x] 一次返回全部错误和警告。
+- [x] Skill 声明但 Role 未绑定的 Tool 阻断发布。
+- [x] 发布时重新校验并计算 content hash。
 ## 不包含
 - Role 试运行。

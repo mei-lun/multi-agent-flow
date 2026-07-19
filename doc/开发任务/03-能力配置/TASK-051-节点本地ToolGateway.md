@@ -10,8 +10,8 @@
 ## 禁止改动
 - 未列出的文件、接口、数据库表、API 路径和 Git Schema。
 ## 验收标准
-- [ ] 容器看不到未授权 Tool 和 Secret。
-- [ ] HTTP Tool 阻止私网跳转、超限响应和非法方法。
-- [ ] 需中央审批时报告 BLOCKED，不跨节点等待 HTTP。
+- [x] 容器看不到未授权 Tool 和 Secret。
+- [x] HTTP Tool 阻止私网跳转、超限响应和非法方法。
+- [x] 需中央审批时报告 BLOCKED，不跨节点等待 HTTP。
 ## 不包含
 - Inbox 决策。

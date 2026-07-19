@@ -596,15 +596,21 @@ class RunnerGitClient:
                 timeout_seconds,
             )
         else:
-            # 分支不存在：创建 orphan worktree（首次注册事件）。
-            # 注意：``--orphan`` 是一个标志（不接受 ``=value`` 语法，也不直接
-            # 接分支名），需要配合 ``-b <branch>`` 指定新分支名。兼容
-            # Git 2.42+ 的 ``worktree add`` 语法（在 Windows Git 2.45 上验证）。
+            # 分支不存在：先创建 detached worktree，再在其中切换到 orphan
+            # 分支。``git worktree add --orphan`` 直到 Git 2.42 才可用，而
+            # macOS 自带 Git 2.37 等长期支持环境仍不识别该选项。这一两阶段
+            # 流程从 Git 2.23 起可用，最终同样得到无父提交且工作树为空的分支。
             rc_wt, _out_wt, err_wt = await self._cli.run(
                 self._repository_path,
-                ["worktree", "add", "--orphan", "-b", branch, worktree_path],
+                ["worktree", "add", "--detach", worktree_path, "HEAD"],
                 timeout_seconds,
             )
+            if rc_wt == 0:
+                rc_wt, _out_wt, err_wt = await self._cli.run(
+                    worktree_path,
+                    ["switch", "--orphan", branch],
+                    timeout_seconds,
+                )
 
         if rc_wt != 0:
             return await self._attempt_failure(
@@ -612,7 +618,7 @@ class RunnerGitClient:
                 event_id=event_id,
                 event_path=event_path,
                 remote=remote,
-                error=f"worktree add failed: {err_wt}",
+                error=f"orphan worktree setup failed: {err_wt}",
                 worktree_path=worktree_path,
                 timeout_seconds=timeout_seconds,
             )

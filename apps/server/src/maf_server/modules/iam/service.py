@@ -54,6 +54,7 @@ from maf_server.core.security import (
     generate_session_token,
     hash_password,
     hash_session_token,
+    is_expired,
     verify_password,
 )
 from maf_server.core.unit_of_work import SqliteUnitOfWork, update_with_expected_version
@@ -397,6 +398,49 @@ class IamServiceImpl:
     # ------------------------------------------------------------------ #
     # logout
     # ------------------------------------------------------------------ #
+
+    async def authenticate_session(self, session_token: str) -> ActorContext:
+        """Resolve a bearer/cookie token into a fresh server-side actor context."""
+
+        if not isinstance(session_token, str) or not session_token:
+            raise UnauthenticatedError("未认证")
+        now = self._clock.now()
+        async with SqliteUnitOfWork(self._database) as uow:
+            session = await self._repository.get_session_by_token_hash(
+                uow.connection, hash_session_token(session_token)
+            )
+            if session is None or session.is_revoked:
+                await uow.rollback()
+                raise UnauthenticatedError("未认证")
+            try:
+                expires_at = datetime.fromisoformat(session.expires_at)
+            except (TypeError, ValueError):
+                await uow.rollback()
+                raise UnauthenticatedError("未认证") from None
+            if is_expired(expires_at, now):
+                await uow.rollback()
+                raise UnauthenticatedError("未认证")
+            user = await self._repository.get_user_by_id(uow.connection, session.user_id)
+            if user is None or user.status != "ACTIVE":
+                await uow.rollback()
+                raise UnauthenticatedError("未认证")
+            permission_keys = await self._repository.get_user_permissions(
+                uow.connection, user.id
+            )
+            await uow.rollback()
+        return ActorContext(
+            user_id=user.id,
+            organization_id=self._organization_id_from_settings(),
+            permission_keys=permission_keys,
+            trace_id="",
+        )
+
+    def _organization_id_from_settings(self) -> str:
+        """Return the configured organization id without coupling auth to HTTP."""
+
+        settings = getattr(self._database, "_settings", None)
+        organization_id = getattr(settings, "organization_id", None)
+        return organization_id if isinstance(organization_id, str) and organization_id else "system"
 
     async def logout(self, actor: ActorContext, session_id: str) -> None:
         """撤销当前会话；幂等。

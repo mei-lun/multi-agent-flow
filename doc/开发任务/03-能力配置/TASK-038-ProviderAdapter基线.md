@@ -10,8 +10,8 @@
 ## 禁止改动
 - 未列出的文件、接口、数据库表、API 路径和 Git Schema。
 ## 验收标准
-- [ ] Codex/OpenAI兼容、GLM、DeepSeek、MiniMax、Kimi Code 可按配置路由。
-- [ ] Provider 错误统一为 code/category/retryable。
-- [ ] 异常和日志不含 Key。
+- [x] Codex/OpenAI兼容、GLM、DeepSeek、MiniMax、Kimi Code 可按配置路由。
+- [x] Provider 错误统一为 code/category/retryable。
+- [x] 异常和日志不含 Key。
 ## 不包含
 - fallback 策略。

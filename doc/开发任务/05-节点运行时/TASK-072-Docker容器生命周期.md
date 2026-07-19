@@ -10,8 +10,8 @@
 ## 禁止改动
 - 未列出的文件、接口、数据库表、API 路径和 Git Schema。
 ## 验收标准
-- [ ] 禁止 Docker Socket、host network、设备和任意宿主挂载。
-- [ ] 超时/异常/epoch 变化都进入同一清理流程。
-- [ ] 只删除带本节点 task label 的资源。
+- [x] 禁止 Docker Socket、host network、设备和任意宿主挂载。
+- [x] 超时/异常/epoch 变化都进入同一清理流程。
+- [x] 只删除带本节点 task label 的资源。
 ## 不包含
 - Agent 逻辑。

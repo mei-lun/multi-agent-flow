@@ -513,6 +513,29 @@ class InboxServiceImpl:
         if not isinstance(meta, dict):
             raise ArgumentError("metadata 必须是 dict")
 
+        # Subject version is captured when the item is created. A decision
+        # against a newer/older subject is stale and must not close the item.
+        # Keep this optional for legacy Inbox rows that predate subject fencing.
+        expected_subject_version = None
+        current_subject_version = None
+        async with SqliteUnitOfWork(self._database) as check_uow:
+            existing = await self._repository.get_item(check_uow.connection, item_id.strip())
+            await check_uow.rollback()
+            if existing is not None:
+                expected_subject_version = existing.metadata.get("subject_version")
+        if expected_subject_version is not None:
+            current_subject_version = meta.get("subject_version")
+            if current_subject_version != expected_subject_version:
+                raise VersionConflictError(
+                    "待办 subject version 已变化，决策已过期",
+                    context={
+                        "item_id": item_id.strip(),
+                        "expected_subject_version": expected_subject_version,
+                        "actual_subject_version": current_subject_version,
+                    },
+                    retryable=True,
+                )
+
         item_id_clean = item_id.strip()
         comment_clean = comment.strip()
         now = self._clock.now()

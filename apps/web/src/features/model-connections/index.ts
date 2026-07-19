@@ -5,3 +5,4 @@ export const createModelConnection = (input: Omit<ModelConnection, "id"> & { sec
 export const updateModelConnection = (id: string, input: Partial<ModelConnection> & { secret?: string; expected_version?: number }) => patch<ModelConnection>(`/api/v1/model-connections/${id}`, input);
 export const testModelConnection = (id: string) => post<Record<string, unknown>>(`/api/v1/model-connections/${id}/test`);
 export const deleteModelConnection = (id: string) => del(`/api/v1/model-connections/${id}`);
+export const getModelUsage = (query = "") => get<Array<Record<string, unknown>> | Page<Record<string, unknown>>>(`/api/v1/model-usage${query ? `?${query}` : ""}`);

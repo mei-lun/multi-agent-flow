@@ -10,8 +10,8 @@
 ## 禁止改动
 - 未列出的文件、接口、数据库表、API 路径和 Git Schema。
 ## 验收标准
-- [ ] 并发 Claim 始终只有一个当前 owner。
-- [ ] SQLite 投影可重建且结果一致。
-- [ ] 所有拒绝具有稳定 reason_code。
+- [x] 并发 Claim 始终只有一个当前 owner。
+- [x] SQLite 投影可重建且结果一致。
+- [x] 所有拒绝具有稳定 reason_code。
 ## 不包含
 - 浏览器 E2E。

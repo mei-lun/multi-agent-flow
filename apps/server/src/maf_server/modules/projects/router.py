@@ -23,9 +23,11 @@ from __future__ import annotations
 
 from typing import Protocol
 
-from fastapi import APIRouter, Depends, Header, status
+from fastapi import APIRouter, Depends, Header, Request, status
 from pydantic import BaseModel, Field
 from typing_extensions import Annotated
+
+from maf_server.api.dependencies import get_current_actor_id
 
 from .schemas import (
     ProjectMemberRole,
@@ -94,6 +96,23 @@ class UpdateMemberRolePayload(BaseModel):
     new_role: ProjectMemberRole
 
 
+class AddInputPayload(BaseModel):
+    name: str
+    content_type: str
+    upload_artifact_version_id: str
+    change_summary: str = ""
+    idempotency_key: str
+
+
+class CreateChangePayload(BaseModel):
+    run_id: str
+    title: str
+    description: str = ""
+    affected_requirement_ids: list[str] = Field(default_factory=list)
+    requested_action: str
+    idempotency_key: str
+
+
 class ProjectListOut(BaseModel):
     """``GET /api/v1/projects`` 响应体。"""
 
@@ -121,18 +140,22 @@ class ErrorResponse(BaseModel):
 # --------------------------------------------------------------------------- #
 
 
-def _actor_id_dependency(x_maf_actor_id: str | None = Header(default=None)) -> str:
+async def _actor_id_dependency(
+    request: Request,
+    x_maf_actor_id: str | None = Header(default=None),
+) -> str:
     """从 ``X-MAF-Actor-ID`` 头读取 ``actor_id``。
 
     TASK-033 仅提供开发期 stub；正式认证中间件将在后续任务实现，构造
     ``ActorContext`` 并注入到路由。本依赖仅返回 ``actor_id`` 字符串，由 service
     层 internally 构建 ``ActorContext``。
     """
-    if not x_maf_actor_id:
-        # 开发期允许匿名调用是危险的；这里返回空串由 service 层拒绝。
-        # 正式中间件应在此返回 401。
+    if x_maf_actor_id:
+        return x_maf_actor_id
+    try:
+        return await get_current_actor_id(request)
+    except Exception:
         return ""
-    return x_maf_actor_id
 
 
 ActorDep = Annotated[str, Depends(_actor_id_dependency)]
@@ -380,6 +403,20 @@ def build_projects_router(service: "ProjectApplicationServiceLike") -> APIRouter
         )
         return _member_to_out(view)
 
+    @router.post("/{project_id}/inputs", status_code=status.HTTP_201_CREATED)
+    async def add_input(project_id: str, payload: AddInputPayload, actor_id: ActorDep) -> dict:
+        return await service.add_input_version(
+            project_id, payload.model_dump(), actor_id=actor_id
+        )
+
+    @router.post("/{project_id}/change-requests", status_code=status.HTTP_201_CREATED)
+    async def create_change_request(
+        project_id: str, payload: CreateChangePayload, actor_id: ActorDep
+    ) -> dict:
+        return await service.create_change_request(
+            project_id, payload.model_dump(), actor_id=actor_id
+        )
+
     return router
 
 
@@ -449,6 +486,12 @@ class ProjectApplicationServiceLike(Protocol):
         *,
         actor_id: str,
     ) -> ProjectMemberView:
+        ...
+
+    async def add_input_version(self, project_id: str, request: dict, *, actor_id: str) -> dict:
+        ...
+
+    async def create_change_request(self, project_id: str, request: dict, *, actor_id: str) -> dict:
         ...
 
 

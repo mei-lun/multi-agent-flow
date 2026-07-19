@@ -1,6 +1,7 @@
 """Run 公共 HTTP 与 SSE 接口。"""
 
 from typing import AsyncIterator, Protocol
+from fastapi import APIRouter, Header, status
 from maf_contracts.common import ActorContext
 from .schemas import *
 
@@ -37,3 +38,36 @@ class RunHttpApi(Protocol):
         """POST `/api/v1/tasks/{id}:retry`；新 Attempt 创建成功 202。"""
         ...
 
+
+def _actor(actor_id: str | None) -> ActorContext:
+    return {"user_id": actor_id or "", "organization_id": "local", "permission_keys": [], "trace_id": ""}
+
+
+def build_runs_router(service: object) -> APIRouter:
+    router = APIRouter(prefix="/api/v1", tags=["runs"])
+
+    @router.post("/projects/{project_id}/runs", status_code=status.HTTP_201_CREATED)
+    async def start(project_id: str, request: dict, x_maf_actor_id: str | None = Header(default=None)) -> dict:
+        return await service.start_run(_actor(x_maf_actor_id), project_id, request)
+
+    @router.get("/runs/{run_id}")
+    async def get(run_id: str, x_maf_actor_id: str | None = Header(default=None)) -> dict:
+        return await service.get_run(_actor(x_maf_actor_id), run_id)
+
+    @router.get("/runs/{run_id}/graph")
+    async def graph(run_id: str, x_maf_actor_id: str | None = Header(default=None)) -> dict:
+        return await service.get_graph(_actor(x_maf_actor_id), run_id)
+
+    @router.post("/runs/{run_id}:pause", status_code=status.HTTP_202_ACCEPTED)
+    async def pause(run_id: str, request: dict, x_maf_actor_id: str | None = Header(default=None)) -> dict:
+        return await service.pause(_actor(x_maf_actor_id), run_id, request)
+
+    @router.post("/runs/{run_id}:resume", status_code=status.HTTP_202_ACCEPTED)
+    async def resume(run_id: str, request: dict, x_maf_actor_id: str | None = Header(default=None)) -> dict:
+        return await service.resume(_actor(x_maf_actor_id), run_id, request)
+
+    @router.post("/runs/{run_id}:cancel", status_code=status.HTTP_202_ACCEPTED)
+    async def cancel(run_id: str, request: dict, x_maf_actor_id: str | None = Header(default=None)) -> dict:
+        return await service.cancel(_actor(x_maf_actor_id), run_id, request)
+
+    return router

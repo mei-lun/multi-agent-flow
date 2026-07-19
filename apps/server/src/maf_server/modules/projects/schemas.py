@@ -237,6 +237,8 @@ class ChangeRequestView(TypedDict):
     title: str
     description: str
     affected_requirement_ids: list[str]
+    requested_action: Literal["PAUSE_AND_REPLAN", "APPLY_NEXT_NODE", "CANCEL"]
+    inbox_item_id: str | None
     created_at: str
 
 

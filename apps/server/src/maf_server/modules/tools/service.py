@@ -41,7 +41,7 @@ from maf_domain.errors import (
     PermissionDeniedError,
 )
 from maf_policy import CasbinPermissionService
-from maf_tool_adapters import ToolAdapter, ToolMetadata
+from maf_tool_adapters import EchoToolAdapter, ToolAdapter, ToolMetadata
 from maf_server.core.database import Database
 from maf_server.core.events import SqliteEventPublisher, init_outbox_schema
 from maf_server.core.unit_of_work import SqliteUnitOfWork
@@ -89,6 +89,45 @@ TOOL_REGISTERED_EVENT_TYPE: str = "tool.registered"
 
 #: ToolRegistered 事件 schema 版本。
 TOOL_REGISTERED_SCHEMA_VERSION: int = 1
+
+_JSON_SCHEMA_TYPES = {"object", "array", "string", "number", "integer", "boolean", "null"}
+
+
+def _validate_json_schema(schema: dict[str, Any], field: str) -> None:
+    """Validate the structural subset accepted by the local Tool Gateway.
+
+    This rejects malformed schemas during registration; runtime argument
+    validation uses the exact persisted schema and never treats an invalid
+    definition as permissive.
+    """
+    # The empty object is the standard permissive JSON Schema and is used by
+    # metadata-only registrations that have no narrower argument contract.
+    if not schema:
+        return
+    schema_type = schema.get("type")
+    if schema_type not in _JSON_SCHEMA_TYPES:
+        raise ArgumentError(f"ToolMetadata.{field}.type is invalid")
+    properties = schema.get("properties")
+    if properties is not None:
+        if schema_type != "object" or not isinstance(properties, dict):
+            raise ArgumentError(f"ToolMetadata.{field}.properties is invalid")
+        for key, subschema in properties.items():
+            if not isinstance(key, str) or not isinstance(subschema, dict):
+                raise ArgumentError(f"ToolMetadata.{field}.properties is invalid")
+            _validate_json_schema(subschema, f"{field}.properties.{key}")
+    required = schema.get("required")
+    if required is not None and (
+        not isinstance(required, list)
+        or not all(isinstance(item, str) for item in required)
+        or properties is None
+        or not set(required).issubset(properties)
+    ):
+        raise ArgumentError(f"ToolMetadata.{field}.required is invalid")
+    items = schema.get("items")
+    if items is not None:
+        if schema_type != "array" or not isinstance(items, dict):
+            raise ArgumentError(f"ToolMetadata.{field}.items is invalid")
+        _validate_json_schema(items, f"{field}.items")
 
 
 # --------------------------------------------------------------------------- #
@@ -182,6 +221,7 @@ class ToolRegistryService:
         repository: SqliteToolRegistryRepository | None = None,
         permission_service: PermissionService | None = None,
         clock: "ClockLike | None" = None,
+        native_allowlist: tuple[type, ...] | None = None,
     ) -> None:
         self._database: Database = database
         self._repository: SqliteToolRegistryRepository = (
@@ -191,6 +231,7 @@ class ToolRegistryService:
             permission_service or CasbinPermissionService()
         )
         self._clock: ClockLike = clock or _SystemClock()
+        self._native_allowlist = native_allowlist or (EchoToolAdapter,)
 
     # ------------------------------------------------------------------ #
     # 注册
@@ -234,6 +275,8 @@ class ToolRegistryService:
 
         # 2. 读取 metadata（不调用 invoke / cancel）
         metadata: ToolMetadata = self._read_metadata(adapter)
+        if metadata.adapter_type == "NATIVE" and not isinstance(adapter, self._native_allowlist) and not getattr(adapter, "is_registration_descriptor", False):
+            raise ArgumentError("NATIVE Tool implementation is not in the startup allowlist")
 
         # 3. 权限检查：tools:write（DESIGNER/ADMIN 通过）
         await self._permission_service.require(actor, ACTION_WRITE, RESOURCE_TOOLS)
@@ -446,6 +489,8 @@ class ToolRegistryService:
             raise ArgumentError("ToolMetadata.input_schema 必须是 dict")
         if not isinstance(output_schema, dict):
             raise ArgumentError("ToolMetadata.output_schema 必须是 dict")
+        _validate_json_schema(input_schema, "input_schema")
+        _validate_json_schema(output_schema, "output_schema")
         if not isinstance(capabilities, list):
             raise ArgumentError("ToolMetadata.capabilities 必须是 list")
         for cap in capabilities:
@@ -701,6 +746,8 @@ class McpToolSyncService:
             permission_service or CasbinPermissionService()
         )
         self._clock: ClockLike = clock or _SystemClock()
+        self._server_tool_names: dict[str, set[str]] = {}
+        self._disabled_mcp_tools: dict[str, set[str]] = {}
 
     # ------------------------------------------------------------------ #
     # 同步
@@ -831,6 +878,16 @@ class McpToolSyncService:
                     )
                 )
 
+        present_names = {
+            info.name for info in remote_tools
+            if isinstance(info.name, str) and info.name
+        }
+        previous_names = self._server_tool_names.get(server_url, set())
+        missing_names = previous_names - present_names
+        self._disabled_mcp_tools.setdefault(server_url, set()).update(missing_names)
+        self._disabled_mcp_tools[server_url].difference_update(present_names)
+        self._server_tool_names[server_url] = present_names
+
         # 8. upsert mcp_servers 配置
         await self._upsert_server_config(
             server_url,
@@ -852,6 +909,10 @@ class McpToolSyncService:
             skipped_count=len(skipped),
             error_count=len(errors),
         )
+
+    def disabled_tools(self, server_url: str) -> list[str]:
+        """Return remote tools disabled by discovery without deleting history."""
+        return sorted(self._disabled_mcp_tools.get(server_url, set()))
 
     # ------------------------------------------------------------------ #
     # 列表 / 移除

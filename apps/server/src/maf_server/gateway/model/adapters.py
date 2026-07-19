@@ -203,7 +203,12 @@ class ProviderAdapterFactory:
 
         return {
             "openai": _openai_factory,
+            "codex": _openai_compatible_factory,
             "openai_compatible": _openai_compatible_factory,
+            "glm": _openai_compatible_factory,
+            "deepseek": _openai_compatible_factory,
+            "minimax": _openai_compatible_factory,
+            "kimi_code": _openai_compatible_factory,
             "anthropic": _anthropic_factory,
             "azure": _azure_factory,
             "local": _local_factory,

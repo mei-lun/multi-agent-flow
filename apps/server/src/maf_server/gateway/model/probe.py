@@ -640,3 +640,23 @@ __all__ = [
     "ProbeResult",
     "VerificationResult",
 ]
+
+# TASK-040 measured profile API lives beside connection configuration but is
+# re-exported here as the model gateway's public discovery surface.
+from maf_server.modules.model_connections.capabilities import (  # noqa: E402
+    CapabilityEvidence,
+    MODEL_CAPABILITIES,
+    ModelPolicyService,
+    ModelPolicyVersion,
+    ModelProfile,
+    ModelProfileService,
+)
+
+__all__ += [
+    "CapabilityEvidence",
+    "MODEL_CAPABILITIES",
+    "ModelPolicyService",
+    "ModelPolicyVersion",
+    "ModelProfile",
+    "ModelProfileService",
+]

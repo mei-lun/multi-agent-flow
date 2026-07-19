@@ -176,8 +176,10 @@ def _write_event_to_node_branch(
     ).returncode == 0
 
     if not branch_exists:
-        # Orphan branch: no parent commit, empty working tree.
-        _git(repo, "worktree", "add", "--orphan", "-b", branch, str(wt))
+        # Git < 2.42 has no ``worktree add --orphan``.  The portable two-step
+        # sequence produces the same parentless branch and empty working tree.
+        _git(repo, "worktree", "add", "--detach", str(wt), "HEAD")
+        _git(wt, "switch", "--orphan", branch)
     else:
         # Check out existing branch into a new worktree for append.
         _git(repo, "worktree", "add", str(wt), branch)

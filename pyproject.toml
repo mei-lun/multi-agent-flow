@@ -24,6 +24,7 @@ dependencies = [
   "keyring>=24.3",
   "cryptography>=42.0",
   "docker>=7.0",
+  "bcrypt>=4.1",
 ]
 
 [project.optional-dependencies]
@@ -40,7 +41,9 @@ pythonpath = [
   "apps/server/src",
   "apps/runner/src",
   "packages/contracts_py/src",
+  "packages/artifact_schemas/src",
   "packages/domain/src",
+  "packages/observability/src",
   "packages/policy/src",
   "packages/provider_adapters/src",
   "packages/tool_adapters/src",

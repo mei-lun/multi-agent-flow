@@ -13,17 +13,43 @@ TASK-033 范围：
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 from typing import Protocol
 
 import aiosqlite
 
 from .schemas import (
+    ChangeRequestView,
+    ProjectInputView,
     ProjectMemberRole,
     ProjectMemberView,
     ProjectStatus,
     ProjectView,
 )
+
+
+PROJECT_EXTENSIONS_DDL = """
+CREATE TABLE IF NOT EXISTS project_input_versions (
+    id TEXT PRIMARY KEY, project_id TEXT NOT NULL, version_no INTEGER NOT NULL,
+    name TEXT NOT NULL, content_type TEXT NOT NULL, artifact_version_id TEXT NOT NULL,
+    change_summary TEXT NOT NULL, idempotency_key TEXT NOT NULL, request_hash TEXT NOT NULL,
+    created_at TEXT NOT NULL, UNIQUE(project_id, version_no), UNIQUE(project_id, idempotency_key)
+);
+CREATE TABLE IF NOT EXISTS project_change_requests (
+    id TEXT PRIMARY KEY, project_id TEXT NOT NULL, run_id TEXT NOT NULL,
+    status TEXT NOT NULL, title TEXT NOT NULL, description TEXT NOT NULL,
+    affected_requirement_ids TEXT NOT NULL, requested_action TEXT NOT NULL,
+    inbox_item_id TEXT, idempotency_key TEXT NOT NULL, request_hash TEXT NOT NULL,
+    created_at TEXT NOT NULL, UNIQUE(project_id, idempotency_key)
+);
+"""
+
+
+async def init_project_extensions_schema(conn: aiosqlite.Connection) -> None:
+    for raw in PROJECT_EXTENSIONS_DDL.split(";"):
+        if raw.strip():
+            await conn.execute(raw.strip())
 
 # --------------------------------------------------------------------------- #
 # 列名常量（用于 SELECT 拼接，避免列名漂移）
@@ -304,6 +330,94 @@ class SqliteProjectRepository:
             (project_id, user_id),
         )
 
+    async def get_input_by_idempotency_key(
+        self, conn: aiosqlite.Connection, project_id: str, key: str
+    ) -> tuple[ProjectInputView, str] | None:
+        async with conn.execute(
+            "SELECT id, project_id, version_no, name, content_type, artifact_version_id, "
+            "change_summary, created_at, request_hash FROM project_input_versions "
+            "WHERE project_id = ? AND idempotency_key = ?", (project_id, key)
+        ) as cur:
+            row = await cur.fetchone()
+        if row is None:
+            return None
+        return ({"id": row[0], "project_id": row[1], "version": row[2], "name": row[3],
+                 "content_type": row[4], "artifact_version_id": row[5],
+                 "change_summary": row[6], "created_at": row[7]}, row[8])
+
+    async def get_input_version(
+        self, conn: aiosqlite.Connection, input_id: str
+    ) -> ProjectInputView | None:
+        async with conn.execute(
+            "SELECT id, project_id, version_no, name, content_type, artifact_version_id, "
+            "change_summary, created_at FROM project_input_versions WHERE id = ?", (input_id,)
+        ) as cur:
+            row = await cur.fetchone()
+        if row is None:
+            return None
+        return {"id": row[0], "project_id": row[1], "version": row[2], "name": row[3],
+                "content_type": row[4], "artifact_version_id": row[5],
+                "change_summary": row[6], "created_at": row[7]}
+
+    async def append_input_version(
+        self, conn: aiosqlite.Connection, *, item: ProjectInputView,
+        idempotency_key: str, request_hash: str
+    ) -> None:
+        await conn.execute(
+            "INSERT INTO project_input_versions (id, project_id, version_no, name, content_type, "
+            "artifact_version_id, change_summary, idempotency_key, request_hash, created_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (item["id"], item["project_id"], item["version"], item["name"], item["content_type"],
+             item["artifact_version_id"], item["change_summary"], idempotency_key, request_hash,
+             item["created_at"]),
+        )
+
+    async def next_input_version(self, conn: aiosqlite.Connection, project_id: str) -> int:
+        async with conn.execute(
+            "SELECT COALESCE(MAX(version_no), 0) + 1 FROM project_input_versions WHERE project_id = ?",
+            (project_id,),
+        ) as cur:
+            row = await cur.fetchone()
+        return int(row[0])
+
+    async def get_change_request_by_key(
+        self, conn: aiosqlite.Connection, project_id: str, key: str
+    ) -> tuple[ChangeRequestView, str] | None:
+        async with conn.execute(
+            "SELECT id, project_id, run_id, status, title, description, affected_requirement_ids, "
+            "requested_action, inbox_item_id, created_at, request_hash FROM project_change_requests "
+            "WHERE project_id = ? AND idempotency_key = ?", (project_id, key)
+        ) as cur:
+            row = await cur.fetchone()
+        if row is None:
+            return None
+        return ({"id": row[0], "project_id": row[1], "run_id": row[2], "status": row[3],
+                 "title": row[4], "description": row[5],
+                 "affected_requirement_ids": json.loads(row[6]), "requested_action": row[7],
+                 "inbox_item_id": row[8], "created_at": row[9]}, row[10])
+
+    async def insert_change_request(
+        self, conn: aiosqlite.Connection, *, item: ChangeRequestView,
+        idempotency_key: str, request_hash: str
+    ) -> None:
+        await conn.execute(
+            "INSERT INTO project_change_requests (id, project_id, run_id, status, title, description, "
+            "affected_requirement_ids, requested_action, inbox_item_id, idempotency_key, request_hash, created_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (item["id"], item["project_id"], item["run_id"], item["status"], item["title"],
+             item["description"], json.dumps(item["affected_requirement_ids"], sort_keys=True),
+             item["requested_action"], item["inbox_item_id"], idempotency_key, request_hash,
+             item["created_at"]),
+        )
+
+    async def set_change_request_inbox(
+        self, conn: aiosqlite.Connection, change_request_id: str, inbox_item_id: str
+    ) -> None:
+        await conn.execute(
+            "UPDATE project_change_requests SET inbox_item_id = ? WHERE id = ?",
+            (inbox_item_id, change_request_id),
+        )
+
 
 __all__ = [
     "ProjectRepository",
@@ -312,4 +426,6 @@ __all__ = [
     "MemberRecord",
     "project_record_to_view",
     "member_record_to_view",
+    "PROJECT_EXTENSIONS_DDL",
+    "init_project_extensions_schema",
 ]

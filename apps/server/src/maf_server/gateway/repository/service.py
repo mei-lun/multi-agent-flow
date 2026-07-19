@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+from fnmatch import fnmatch
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -11,7 +12,8 @@ from typing import Any, Literal, Protocol
 import structlog
 
 from maf_contracts.repository import *  # noqa: F401,F403
-from maf_domain.errors import ArgumentError, NotFoundError
+from maf_contracts.coordination import CoordinationEventModel, CoordinationTask
+from maf_domain.errors import ArgumentError, NotFoundError, ValidationError
 
 from maf_server.gateway.repository.git_cli import ServerGitCli
 from maf_server.gateway.secrets.service import SecretService
@@ -105,6 +107,128 @@ class RepositoryGateway(Protocol):
     async def merge_review(self, command: RepositoryCommand) -> MergeResult:  # type: ignore[name-defined] # noqa: F821
         """再次校验 expected head 后调用 Adapter；Gateway 不自行判断产品 Gate 是否通过。"""
         ...
+
+
+@dataclass(frozen=True)
+class SubmissionValidationResult:
+    branch: str
+    base_commit: str
+    head_commit: str
+    changed_paths: tuple[str, ...]
+
+
+class SubmissionBranchValidator:
+    """Validate a node submission against immutable Git facts (TASK-026)."""
+
+    _SAFE_BRANCH = re.compile(r"^[A-Za-z0-9._/-]+$")
+
+    def __init__(self, *, git_cli: Any, repository_path: str) -> None:
+        self._git_cli = git_cli
+        self._repository_path = repository_path
+
+    async def validate_submission(
+        self,
+        event: CoordinationEventModel,
+        current_task: CoordinationTask,
+        *,
+        current_control_commit: str | None = None,
+    ) -> SubmissionValidationResult:
+        if event.event_type != "SUBMISSION_CREATED":
+            raise ArgumentError("submission validator requires SUBMISSION_CREATED")
+        assignment = current_task.get("assignment") or {}
+        task_id = str(current_task.get("task_id", ""))
+        epoch = assignment.get("assignment_epoch")
+        owner = assignment.get("node_id")
+        assignment_id = assignment.get("assignment_id")
+        if not task_id or not assignment or epoch is None:
+            raise ValidationError("task has no current assignment")
+        if event.task_id != task_id or event.node_id != owner:
+            raise ValidationError("submission owner or task does not match current assignment")
+        if event.assignment_id != assignment_id or event.assignment_epoch != epoch:
+            raise ValidationError("submission assignment id or epoch is stale")
+        if current_control_commit and event.based_on_control_commit != current_control_commit:
+            raise ValidationError("submission is based on a stale control commit")
+
+        payload = event.payload
+        branch = payload.get("branch")
+        base = payload.get("base_commit")
+        head = payload.get("head_commit")
+        changed_paths = payload.get("changed_paths")
+        if not all(isinstance(value, str) and value for value in (branch, base, head)):
+            raise ValidationError("submission branch, base_commit and head_commit are required")
+        if not isinstance(changed_paths, list) or any(
+            not isinstance(path, str) or not path for path in changed_paths
+        ):
+            raise ValidationError("submission changed_paths must be a string list")
+        if not self._SAFE_BRANCH.fullmatch(branch) or ".." in branch:
+            raise ValidationError("submission branch name is invalid")
+        expected_branch = f"maf/task/{task_id}/e{epoch}-{owner}"
+        if branch != expected_branch:
+            raise ValidationError(
+                "submission branch is outside the current assignment",
+                context={"expected_branch": expected_branch, "actual_branch": branch},
+            )
+
+        resolved_head = await self._rev_parse(f"refs/heads/{branch}")
+        if resolved_head != head:
+            raise ValidationError("submission head does not match task branch head")
+        await self._rev_parse(base)
+        await self._rev_parse(head)
+        rc, _out, _err = await self._git_cli.run(
+            self._repository_path,
+            # ``merge-base`` is intentionally not in the server Git CLI
+            # allow-list. If base is reachable from head, ``base --not head``
+            # has no output; a divergent base leaves at least one commit.
+            ["rev-list", "--max-count=1", base, "--not", head],
+            0,
+        )
+        if rc != 0 or _out.strip():
+            raise ValidationError("submission base is not an ancestor of head")
+        expected_base = (current_task.get("delivery") or {}).get("base_commit")
+        if expected_base and base != expected_base:
+            raise ValidationError("submission base differs from assigned base")
+
+        rc, out, err = await self._git_cli.run(
+            self._repository_path,
+            ["diff", "--name-only", f"{base}..{head}"],
+            0,
+        )
+        if rc != 0:
+            raise ValidationError(f"cannot inspect submission diff: {err.strip()}")
+        actual_paths = tuple(sorted(line.strip() for line in out.splitlines() if line.strip()))
+        claimed_paths = tuple(sorted(set(changed_paths)))
+        if actual_paths != claimed_paths:
+            raise ValidationError(
+                "submission changed_paths do not match Git diff",
+                context={"claimed": claimed_paths, "actual": actual_paths},
+            )
+        if any(path == ".maf" or path.startswith(".maf/") for path in actual_paths):
+            raise ValidationError("task submission must not modify control protocol files")
+        allowed_paths = (current_task.get("requirements") or {}).get("allowed_paths", [])
+        if allowed_paths and any(
+            not any(fnmatch(path, pattern) for pattern in allowed_paths)
+            for path in actual_paths
+        ):
+            raise ValidationError("submission modifies paths outside task scope")
+
+        has_test_evidence = any(
+            (
+                isinstance(payload.get(field), str) and bool(payload.get(field).strip())
+            )
+            or (isinstance(payload.get(field), list) and bool(payload.get(field)))
+            for field in ("test_summary", "test_report_path", "test_evidence")
+        )
+        if not has_test_evidence:
+            raise ValidationError("submission must include test evidence")
+        return SubmissionValidationResult(branch, base, head, actual_paths)
+
+    async def _rev_parse(self, ref: str) -> str:
+        rc, out, err = await self._git_cli.run(
+            self._repository_path, ["rev-parse", "--verify", ref], 0
+        )
+        if rc != 0:
+            raise ValidationError(f"submission Git ref does not exist: {err.strip()}")
+        return out.strip()
 
 
 # --------------------------------------------------------------------------- #

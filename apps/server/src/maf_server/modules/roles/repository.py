@@ -1,19 +1,45 @@
-"""Role Definition 与 Version 持久化接口。"""
+"""In-memory Role Definition and immutable version repository."""
 
+from __future__ import annotations
+
+import copy
 from typing import Protocol
+
 from .schemas import RoleVersionView, RoleView
 
 
 class RoleRepository(Protocol):
+    async def get_role(self, role_id: str) -> RoleView | None: ...
+    async def get_version(self, version_id: str) -> RoleVersionView | None: ...
+    async def save_role(self, role: RoleView) -> RoleView: ...
+    async def save_version(self, version: RoleVersionView, expected_version: int | None = None) -> RoleVersionView: ...
+
+
+class InMemoryRoleRepository:
+    def __init__(self) -> None:
+        self.roles: dict[str, RoleView] = {}
+        self.versions: dict[str, RoleVersionView] = {}
+
     async def get_role(self, role_id: str) -> RoleView | None:
-        """读取稳定 Definition；不存在为 None。"""
-        ...
+        value = self.roles.get(role_id)
+        return copy.deepcopy(value) if value else None
+
     async def get_version(self, version_id: str) -> RoleVersionView | None:
-        """读取精确不可变版本；不得自动替换为 latest。"""
-        ...
+        value = self.versions.get(version_id)
+        return copy.deepcopy(value) if value else None
+
     async def save_role(self, role: RoleView) -> RoleView:
-        """按组织唯一 key 创建/更新 Definition 元数据。"""
-        ...
+        self.roles[role["id"]] = copy.deepcopy(role)
+        return copy.deepcopy(role)
+
     async def save_version(self, version: RoleVersionView, expected_version: int | None = None) -> RoleVersionView:
-        """创建 DRAFT 或乐观锁发布；PUBLISHED 字段禁止更新。"""
-        ...
+        existing = self.versions.get(version["id"])
+        if existing and existing["status"] == "PUBLISHED" and existing != version:
+            raise ValueError("published Role versions are immutable")
+        if expected_version is not None and existing and existing["version"] != expected_version:
+            raise ValueError("Role version conflict")
+        self.versions[version["id"]] = copy.deepcopy(version)
+        return copy.deepcopy(version)
+
+
+__all__ = ["InMemoryRoleRepository", "RoleRepository"]

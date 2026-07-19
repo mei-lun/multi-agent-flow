@@ -10,8 +10,8 @@
 ## 禁止改动
 - 未列出的文件、接口、数据库表、API 路径和 Git Schema。
 ## 验收标准
-- [ ] 任一 Gate 未通过都不能合并。
-- [ ] 审批后 head 变化必须重新评审。
-- [ ] merge commit 固定后才把 control task 写 DONE。
+- [x] 任一 Gate 未通过都不能合并。
+- [x] 审批后 head 变化必须重新评审。
+- [x] merge commit 固定后才把 control task 写 DONE。
 ## 不包含
 - 自动绕过分支保护。

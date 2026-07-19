@@ -10,8 +10,8 @@
 ## 禁止改动
 - 未列出的文件、接口、数据库表、API 路径和 Git Schema。
 ## 验收标准
-- [ ] 不修改用户权威工作树。
-- [ ] 分支严格为当前 task/epoch/node。
-- [ ] 收集 head、tree 和 changed paths。
+- [x] 不修改用户权威工作树。
+- [x] 分支严格为当前 task/epoch/node。
+- [x] 收集 head、tree 和 changed paths。
 ## 不包含
 - push 和提交事件。

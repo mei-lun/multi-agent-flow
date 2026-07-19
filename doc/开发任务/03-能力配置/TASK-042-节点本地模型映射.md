@@ -10,8 +10,8 @@
 ## 禁止改动
 - 未列出的文件、接口、数据库表、API 路径和 Git Schema。
 ## 验收标准
-- [ ] Git 文件不含 Key 或本地 Secret ID。
-- [ ] 节点缺少所需别名时不能 Claim。
-- [ ] 映射变化不会改变已开始 assignment 的快照。
+- [x] Git 文件不含 Key 或本地 Secret ID。
+- [x] 节点缺少所需别名时不能 Claim。
+- [x] 映射变化不会改变已开始 assignment 的快照。
 ## 不包含
 - 模型调用循环。

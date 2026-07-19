@@ -26,7 +26,7 @@ data/
 
 # Runner workspaces and generated artifacts
 workspaces/
-artifacts/
+/artifacts/
 coverage/
 playwright-report/
 test-results/

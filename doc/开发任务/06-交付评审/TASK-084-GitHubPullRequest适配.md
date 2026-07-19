@@ -10,8 +10,8 @@
 ## 禁止改动
 - 未列出的文件、接口、数据库表、API 路径和 Git Schema。
 ## 验收标准
-- [ ] 重试不创建重复 PR。
-- [ ] PR head 变化会使旧评审失效。
-- [ ] GitHub Token 仅从 SecretStore 解析。
+- [x] 重试不创建重复 PR。
+- [x] PR head 变化会使旧评审失效。
+- [x] GitHub Token 仅从 SecretStore 解析。
 ## 不包含
 - 最终业务 Gate。

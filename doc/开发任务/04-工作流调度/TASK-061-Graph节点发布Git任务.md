@@ -10,8 +10,8 @@
 ## 禁止改动
 - 未列出的文件、接口、数据库表、API 路径和 Git Schema。
 ## 验收标准
-- [ ] graph node 重放不重复创建任务。
-- [ ] 不在 Graph 节点中调用远程 Agent。
-- [ ] checkpoint 进入 WAITING_GIT_TASK。
+- [x] graph node 重放不重复创建任务。
+- [x] 不在 Graph 节点中调用远程 Agent。
+- [x] checkpoint 进入 WAITING_GIT_TASK。
 ## 不包含
 - 节点 Claim。

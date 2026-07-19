@@ -10,8 +10,8 @@
 ## 禁止改动
 - 未列出的文件、接口、数据库表、API 路径和 Git Schema。
 ## 验收标准
-- [ ] 只能针对本项目非终态 Run 创建。
-- [ ] 请求不直接修改 checkpoint 或 control task。
-- [ ] 决策通过事件交给 Scheduler 处理。
+- [x] 只能针对本项目非终态 Run 创建。
+- [x] 请求不直接修改 checkpoint 或 control task。
+- [x] 决策通过事件交给 Scheduler 处理。
 ## 不包含
 - Scheduler 重规划实现。

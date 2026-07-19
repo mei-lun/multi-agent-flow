@@ -10,8 +10,8 @@
 ## 禁止改动
 - 未列出的文件、接口、数据库表、API 路径和 Git Schema。
 ## 验收标准
-- [ ] 未知 key 拒绝。
-- [ ] 敏感值只返回 configured/fingerprint。
-- [ ] 并发更新产生版本冲突而非覆盖。
+- [x] 未知 key 拒绝。
+- [x] 敏感值只返回 configured/fingerprint。
+- [x] 并发更新产生版本冲突而非覆盖。
 ## 不包含
 - 节点本地模型设置同步。

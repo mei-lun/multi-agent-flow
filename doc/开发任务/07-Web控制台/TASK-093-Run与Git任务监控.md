@@ -10,8 +10,8 @@
 ## 禁止改动
 - 未列出的文件、接口、数据库表、API 路径和 Git Schema。
 ## 验收标准
-- [ ] SSE 断线可从 Last-Event-ID 续传。
-- [ ] 任务状态与 SQLite Git 投影一致。
-- [ ] Pause/Resume/Cancel 显示异步收敛状态。
+- [x] SSE 断线可从 Last-Event-ID 续传。
+- [x] 任务状态与 SQLite Git 投影一致。
+- [x] Pause/Resume/Cancel 显示异步收敛状态。
 ## 不包含
 - 节点日志流式上传。

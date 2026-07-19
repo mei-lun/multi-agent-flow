@@ -18,9 +18,11 @@ from __future__ import annotations
 
 from typing import Protocol
 
-from fastapi import APIRouter, Depends, Header, status
+from fastapi import APIRouter, Depends, Header, Request, status
 from pydantic import BaseModel, Field
 from typing_extensions import Annotated
+
+from maf_server.api.dependencies import get_current_actor_id
 
 from .schemas import CredentialType
 
@@ -75,11 +77,17 @@ class ErrorResponse(BaseModel):
 # --------------------------------------------------------------------------- #
 
 
-def _actor_id_dependency(x_maf_actor_id: str | None = Header(default=None)) -> str:
+async def _actor_id_dependency(
+    request: Request,
+    x_maf_actor_id: str | None = Header(default=None),
+) -> str:
     """从 ``X-MAF-Actor-ID`` 头读取 ``actor_id``。"""
-    if not x_maf_actor_id:
+    if x_maf_actor_id:
+        return x_maf_actor_id
+    try:
+        return await get_current_actor_id(request)
+    except Exception:
         return ""
-    return x_maf_actor_id
 
 
 ActorDep = Annotated[str, Depends(_actor_id_dependency)]

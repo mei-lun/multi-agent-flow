@@ -45,7 +45,9 @@ TASK-025 在 :class:`LocalGitCoordinationService` 新增 :meth:`process_event`
 from __future__ import annotations
 
 import json
+import hashlib
 import shutil
+import threading
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Protocol, TypedDict, cast
@@ -127,9 +129,8 @@ class CoordinationSnapshot(TypedDict):
     - ``tasks_paths``：``.maf/tasks/`` 下所有文件路径（相对仓库根，含 ``.maf/tasks/`` 前缀）；
     - ``nodes_paths``：``.maf/nodes/`` 下所有文件路径；
     - ``events_paths``：``.maf/events/`` 下所有文件路径；
-    - ``tasks``：从 ``tasks/`` 解析的任务对象列表（TASK-016 仅提供空列表占位，
-      解析由 TASK-017/019 等后续任务填充）；
-    - ``nodes``：从 ``nodes/`` 解析的节点对象列表（同上，仅占位）；
+    - ``tasks``：从 ``tasks/`` 解析并通过 task-v1 Schema 的任务对象列表；
+    - ``nodes``：从 ``nodes/`` 解析并通过 node-v1 Schema 的节点对象列表；
     - ``generated_at``：快照生成时间（ISO 8601，UTC），便于审计。
 
     本 TypedDict 是 :class:`maf_contracts.coordination.CoordinationSnapshot` 的超集
@@ -589,6 +590,10 @@ class ClaimDecision(TypedDict):
     node_id: str
     reason: str
     assignment_epoch: int | None
+    accepted: bool
+    reason_code: str
+    assignment_id: str | None
+    assignment: dict[str, Any] | None
 
 
 class TaskAllocator:
@@ -627,6 +632,8 @@ class TaskAllocator:
 
     #: 无可用任务的 reason 取值（与 :class:`ClaimDecision.reason` 对齐）。
     REASON_NO_MATCHING_TASKS: str = "no_matching_tasks"
+    REASON_NODE_UNAVAILABLE: str = "node_unavailable"
+    REASON_NODE_AT_CAPACITY: str = "node_at_capacity"
 
     def __init__(self, *, initial_epoch: int = _DEFAULT_INITIAL_EPOCH) -> None:
         if initial_epoch < 0:
@@ -635,6 +642,8 @@ class TaskAllocator:
                 context={"initial_epoch": initial_epoch},
             )
         self._next_epoch: int = initial_epoch
+        self._claim_lock = threading.Lock()
+        self._reserved_owners: dict[tuple[str, str], str] = {}
 
     @property
     def next_assignment_epoch(self) -> int:
@@ -680,6 +689,19 @@ class TaskAllocator:
 
         node_caps = set(node_capabilities.get("capabilities", []) or [])
 
+        if (
+            node_capabilities.get("node_id") != node_id
+            or node_capabilities.get("status") != "ACTIVE"
+        ):
+            return self._rejected(node_id, self.REASON_NODE_UNAVAILABLE)
+
+        active_for_node = sum(
+            1
+            for task in snapshot.get("tasks", []) or []
+            if (task.get("assignment") or {}).get("node_id") == node_id
+            and task.get("status") in {"ASSIGNED", "IN_PROGRESS", "BLOCKED", "REWORK_REQUIRED"}
+        )
+
         # 1. 收集节点已经在处理的 task_id（assignment.node_id == node_id），
         #    不论任务状态。覆盖 lease 过期后 requeue 但 assignment 字段未清
         #    的边界情况，避免把同一任务重复派给同节点。
@@ -693,6 +715,10 @@ class TaskAllocator:
 
         # 2. 筛选 READY + 未分配 + 节点未处理的任务。
         candidates: list[CoordinationTask] = []
+        states = {
+            str(task.get("task_id")): str(task.get("status"))
+            for task in snapshot.get("tasks", []) or []
+        }
         for task in snapshot.get("tasks", []) or []:
             if task.get("status") != "READY":
                 continue
@@ -702,6 +728,8 @@ class TaskAllocator:
                 continue
             task_id = task.get("task_id", "")
             if task_id in node_active_task_ids:
+                continue
+            if any(states.get(str(dependency)) != "DONE" for dependency in task.get("dependencies", [])):
                 continue
             candidates.append(task)
 
@@ -714,28 +742,70 @@ class TaskAllocator:
                 matching.append(task)
 
         if not matching:
-            return ClaimDecision(
-                task_id=None,
-                node_id=node_id,
-                reason=self.REASON_NO_MATCHING_TASKS,
-                assignment_epoch=None,
-            )
+            return self._rejected(node_id, self.REASON_NO_MATCHING_TASKS)
 
         # 4. 确定性排序：priority 降序（高优先级先），task_id 升序（字典序）。
         matching.sort(
             key=lambda t: (-int(t.get("priority", 0) or 0), t.get("task_id", ""))
         )
 
-        chosen = matching[0]
-        # 5. 分配 epoch 递增（仅成功分配时递增，无匹配时不递增）。
-        self._next_epoch += 1
-        epoch = self._next_epoch
+        control_commit = str(snapshot.get("control_commit", ""))
+        with self._claim_lock:
+            reserved_for_node = sum(
+                1
+                for (commit, _task_id), owner in self._reserved_owners.items()
+                if commit == control_commit and owner == node_id
+            )
+            if active_for_node + reserved_for_node >= int(
+                node_capabilities.get("capacity", 0) or 0
+            ):
+                return self._rejected(node_id, self.REASON_NODE_AT_CAPACITY)
+            chosen = next(
+                (
+                    task
+                    for task in matching
+                    if (control_commit, str(task["task_id"])) not in self._reserved_owners
+                ),
+                None,
+            )
+            if chosen is None:
+                return self._rejected(node_id, self.REASON_NO_MATCHING_TASKS)
+            self._next_epoch += 1
+            epoch = self._next_epoch
+            task_id = str(chosen["task_id"])
+            self._reserved_owners[(control_commit, task_id)] = node_id
 
+        assignment_id = "asg-" + hashlib.sha256(
+            f"{control_commit}\0{task_id}\0{node_id}\0{epoch}".encode("utf-8")
+        ).hexdigest()[:24]
+        assignment = {
+            "node_id": node_id,
+            "assignment_id": assignment_id,
+            "assignment_epoch": epoch,
+            "based_on_control_commit": control_commit,
+        }
         return ClaimDecision(
-            task_id=chosen["task_id"],
+            task_id=task_id,
             node_id=node_id,
             reason=self.REASON_CLAIM_GRANTED,
+            reason_code=self.REASON_CLAIM_GRANTED,
+            accepted=True,
             assignment_epoch=epoch,
+            assignment_id=assignment_id,
+            assignment=assignment,
+        )
+
+    @staticmethod
+    def _rejected(node_id: str, reason_code: str) -> ClaimDecision:
+        return ClaimDecision(
+            task_id=None,
+            node_id=node_id,
+            reason=reason_code,
+            reason_code=reason_code,
+            accepted=False,
+            assignment_epoch=None,
+            assignment_id=None,
+            assignment=None,
         )
 
 
@@ -902,9 +972,11 @@ class LocalGitCoordinationService:
         repository_path: str,
         control_branch: str = "maf/control",
         default_branch: str = "main",
+        remote_name: str | None = None,
         templates_dir: Path | None = None,
         schema_loader: SchemaLoader | None = None,
         state_service: GitCoordinationStateService | None = None,
+        projection_repository: Any | None = None,
         logger: Any = None,
     ) -> None:
         if not control_branch:
@@ -915,6 +987,7 @@ class LocalGitCoordinationService:
         self._repository_path: str = repository_path
         self._control_branch: str = control_branch
         self._default_branch: str = default_branch
+        self._remote_name: str | None = remote_name
         self._templates_dir: Path = (
             templates_dir if templates_dir is not None else self._default_templates_dir()
         )
@@ -922,6 +995,7 @@ class LocalGitCoordinationService:
         self._state_service: GitCoordinationStateService = (
             state_service or GitCoordinationStateService()
         )
+        self._projection_repository: Any | None = projection_repository
         self._log: Any = logger or structlog.get_logger("maf.git_coordination")
 
     # ------------------------------------------------------------------ #
@@ -1347,7 +1421,51 @@ class LocalGitCoordinationService:
             self._control_branch, f"{_MAF_DIR_NAME}/events/"
         )
 
-        # 9. 构造快照（tasks/nodes 解析留给 TASK-017/019 等后续任务，此处为空列表占位）。
+        # 9. 读取并校验任务/节点对象。解析发生在临时内存对象中；任何一个
+        # 文件失败都会抛出异常，因此调用方永远不会拿到“半个快照”。
+        async def load_objects(
+            paths: list[str], *, schema_name: str
+        ) -> list[dict[str, Any]]:
+            objects: list[dict[str, Any]] = []
+            for path in paths:
+                # .gitkeep 以及未来可能加入的说明文件不是协议对象。
+                if Path(path).suffix.lower() not in {".yaml", ".yml", ".json"}:
+                    continue
+                raw_text = await self._read_file_from_branch(self._control_branch, path)
+                try:
+                    if Path(path).suffix.lower() == ".json":
+                        value = json.loads(raw_text)
+                    else:
+                        value = yaml.safe_load(raw_text)
+                except (json.JSONDecodeError, yaml.YAMLError) as exc:
+                    raise ValidationError(
+                        f"invalid coordination document: {path}: {exc}",
+                        context={
+                            "file_path": f"{self._control_branch}:{path}",
+                            "reason": "invalid_document",
+                        },
+                    ) from exc
+                if not isinstance(value, dict):
+                    raise ValidationError(
+                        f"coordination document must be an object: {path}",
+                        context={
+                            "file_path": f"{self._control_branch}:{path}",
+                            "reason": "document_not_object",
+                        },
+                    )
+                self._schema_loader.validate(
+                    SchemaRef(name=schema_name, version=ProtocolVersion.latest().value),
+                    value,
+                    source_file=Path(f"{self._control_branch}:{path}"),
+                )
+                objects.append(value)
+            objects.sort(key=lambda value: str(value.get("task_id", value.get("node_id", ""))))
+            return objects
+
+        tasks = await load_objects(tasks_paths, schema_name="task")
+        nodes = await load_objects(nodes_paths, schema_name="node")
+
+        # 10. 构造完整快照。所有对象已经完成校验，排序不依赖 Git 文件写入顺序。
         snapshot: CoordinationSnapshot = {
             "project_id": project_id,
             "control_commit": control_commit,
@@ -1357,8 +1475,8 @@ class LocalGitCoordinationService:
             "tasks_paths": tasks_paths,
             "nodes_paths": nodes_paths,
             "events_paths": events_paths,
-            "tasks": [],
-            "nodes": [],
+            "tasks": cast(list[CoordinationTask], tasks),
+            "nodes": cast(list[NodeManifest], nodes),
             "generated_at": datetime.now(timezone.utc).isoformat(),
         }
 
@@ -1372,6 +1490,360 @@ class LocalGitCoordinationService:
             events_count=len(events_paths),
         )
         return snapshot
+
+    async def publish_tasks(
+        self,
+        project_id: str,
+        tasks: list[CoordinationTask],
+        expected_control_commit: str,
+    ) -> str:
+        """Publish immutable task documents to ``maf/control``.
+
+        The operation is fenced by the caller's control HEAD and never uses a
+        force push.  A task's ``requirements.idempotency_key`` is the stable
+        deduplication key; an already published key returns the current control
+        commit without creating another document.
+        """
+        if not project_id:
+            raise ArgumentError("project_id must not be empty")
+        if not expected_control_commit:
+            raise ArgumentError("expected_control_commit must not be empty")
+        if not await self._branch_exists(self._control_branch):
+            raise UnsupportedOperationError("control branch does not exist")
+        current = await self._rev_parse(self._control_branch)
+        if current != expected_control_commit:
+            # A retry after our own successful commit may legitimately carry
+            # the old expected head.  Accept it only when every submitted
+            # idempotency key already maps to the same task ID.
+            try:
+                retry_snapshot = await self.fetch_control(project_id)
+                existing_keys = {
+                    str(item.get("requirements", {}).get("idempotency_key")): str(item.get("task_id"))
+                    for item in retry_snapshot["tasks"]
+                    if isinstance(item.get("requirements"), dict)
+                    and item.get("requirements", {}).get("idempotency_key")
+                }
+                if tasks and all(
+                    isinstance(task.get("requirements"), dict)
+                    and task.get("requirements", {}).get("idempotency_key")
+                    and existing_keys.get(str(task["requirements"]["idempotency_key"])) == str(task.get("task_id"))
+                    for task in tasks
+                ):
+                    return current
+            except Exception:
+                # The normal head-fencing error below is more useful than a
+                # parse error when the remote changed to an invalid snapshot.
+                pass
+            raise UnsupportedOperationError(
+                "control head changed; retry from a fresh snapshot",
+                context={
+                    "reason": "control_head_conflict",
+                    "expected_control_commit": expected_control_commit,
+                    "actual_control_commit": current,
+                },
+            )
+
+        task_ref = SchemaRef(name="task", version=ProtocolVersion.latest().value)
+        task_properties = set(self._schema_loader.get_schema(task_ref).get("properties", {}))
+
+        def wire_task(task: CoordinationTask) -> dict[str, Any]:
+            # Keep the Python contract a superset of the currently published
+            # JSON Schema.  Unknown top-level fields are intentionally omitted
+            # from the wire file so a later snapshot can validate it again.
+            return {key: value for key, value in dict(task).items() if key in task_properties}
+
+        # Validate the complete batch before touching the worktree.
+        ids: set[str] = set()
+        idempotency_keys: set[str] = set()
+        for task in tasks:
+            if not isinstance(task, dict):
+                raise ValidationError("task must be an object")
+            task_id = str(task.get("task_id", ""))
+            if not task_id or "/" in task_id or "\\" in task_id or task_id in ids:
+                raise ValidationError(f"invalid or duplicate task_id: {task_id!r}")
+            ids.add(task_id)
+            requirements = task.get("requirements")
+            if not isinstance(requirements, dict):
+                raise ValidationError(f"task requirements must be an object: {task_id}")
+            key = requirements.get("idempotency_key")
+            if key:
+                key = str(key)
+                if key in idempotency_keys:
+                    raise ValidationError(f"duplicate idempotency_key in batch: {key}")
+                idempotency_keys.add(key)
+            self._schema_loader.validate(
+                task_ref,
+                wire_task(task),
+                source_file=Path(f"{self._control_branch}:.maf/tasks/{task_id}.yaml"),
+            )
+
+        snapshot = await self.fetch_control(project_id)
+        existing_tasks = {str(task["task_id"]): task for task in snapshot["tasks"]}
+        existing_idempotency = {
+            str(task.get("requirements", {}).get("idempotency_key")): str(task["task_id"])
+            for task in snapshot["tasks"]
+            if isinstance(task.get("requirements"), dict)
+            and task.get("requirements", {}).get("idempotency_key")
+        }
+        new_tasks: list[CoordinationTask] = []
+        for task in tasks:
+            key = str(task.get("requirements", {}).get("idempotency_key", ""))
+            if key and key in existing_idempotency:
+                continue
+            if task["task_id"] in existing_tasks:
+                if existing_tasks[task["task_id"]] != wire_task(task):
+                    raise UnsupportedOperationError(
+                        f"task_id already exists with different content: {task['task_id']}"
+                    )
+                continue
+            new_tasks.append(task)
+
+        all_tasks = {**existing_tasks, **{str(task["task_id"]): task for task in new_tasks}}
+        for task in new_tasks:
+            for dependency in task.get("dependencies", []):
+                if dependency not in all_tasks:
+                    raise ValidationError(
+                        f"task {task['task_id']} depends on missing task {dependency}"
+                    )
+        graph = {
+            task_id: [str(dep) for dep in task.get("dependencies", [])]
+            for task_id, task in all_tasks.items()
+        }
+        visiting: set[str] = set()
+        visited: set[str] = set()
+
+        def visit(task_id: str) -> None:
+            if task_id in visiting:
+                raise ValidationError(f"task dependency cycle includes {task_id}")
+            if task_id in visited:
+                return
+            visiting.add(task_id)
+            for dependency in graph.get(task_id, []):
+                visit(dependency)
+            visiting.remove(task_id)
+            visited.add(task_id)
+
+        for task_id in sorted(graph):
+            visit(task_id)
+        if not new_tasks:
+            return current
+
+        original_ref = await self._current_ref_for_restore()
+        try:
+            rc, _out, err = await self._git_cli.run(
+                self._repository_path, ["switch", self._control_branch], 0
+            )
+            if rc != 0:
+                raise ExternalDependencyError(f"cannot switch to control: {err.strip()}")
+            # Re-check after switching to close the race between initial read
+            # and the write transaction.
+            if await self._rev_parse(self._control_branch) != expected_control_commit:
+                raise UnsupportedOperationError("control head changed before publish")
+            task_dir = Path(self._repository_path) / _MAF_DIR_NAME / "tasks"
+            task_dir.mkdir(parents=True, exist_ok=True)
+            for task in sorted(new_tasks, key=lambda item: str(item["task_id"])):
+                path = task_dir / f"{task['task_id']}.yaml"
+                path.write_text(
+                    yaml.safe_dump(wire_task(task), allow_unicode=True, sort_keys=False),
+                    encoding="utf-8",
+                )
+            status_path = Path(self._repository_path) / _MAF_DIR_NAME / "status.md"
+            status_path.write_text(
+                self.generate_status(
+                    tasks=list(all_tasks.values()),
+                    nodes=snapshot["nodes"],
+                    current_status=snapshot.get("status_md"),
+                ),
+                encoding="utf-8",
+            )
+            rc, _out, err = await self._git_cli.run(
+                self._repository_path,
+                [
+                    "add",
+                    *[f".maf/tasks/{task['task_id']}.yaml" for task in new_tasks],
+                    ".maf/status.md",
+                ],
+                0,
+            )
+            if rc != 0:
+                raise ExternalDependencyError(f"git add tasks failed: {err.strip()}")
+            rc, _out, err = await self._git_cli.run(
+                self._repository_path,
+                ["commit", "-m", f"maf: publish {len(new_tasks)} task(s)"],
+                0,
+            )
+            if rc != 0:
+                raise ExternalDependencyError(f"git commit tasks failed: {err.strip()}")
+            new_commit = await self._rev_parse(self._control_branch)
+            # Push only when the composition root explicitly configured a
+            # remote.  The normal push path is fast-forward-only by Git's
+            # default and never passes a force flag.
+            if self._remote_name:
+                push = getattr(self._git_cli, "push", None)
+                if push is not None:
+                    rc, _out, err = await push(
+                        self._repository_path,
+                        self._remote_name,
+                        f"{self._control_branch}:{self._control_branch}",
+                    )
+                else:
+                    rc, _out, err = await self._git_cli.run(
+                        self._repository_path,
+                        [
+                            "push",
+                            "--",
+                            self._remote_name,
+                            f"{self._control_branch}:{self._control_branch}",
+                        ],
+                        0,
+                    )
+                if rc != 0:
+                    raise ExternalDependencyError(f"git push tasks failed: {err.strip()}")
+            return new_commit
+        finally:
+            await self._restore_ref(original_ref)
+
+    # ------------------------------------------------------------------ #
+    # TASK-028: deterministic status.md generation
+    # ------------------------------------------------------------------ #
+
+    _STATUS_HASH_PREFIX = "<!-- maf-status-sha256: "
+    _STATUS_PROTOCOL = "maf/status-v1"
+
+    def generate_status(
+        self,
+        *,
+        tasks: list[CoordinationTask],
+        nodes: list[NodeManifest],
+        current_status: str | None = None,
+    ) -> str:
+        """Generate the authoritative status overview from task/node facts.
+
+        No wall-clock value is included, so equal inputs produce byte-identical
+        output. The embedded digest covers every line except its own marker;
+        a missing or mismatched digest means a generated file was edited.
+        """
+        if current_status and not self.status_digest_matches(current_status):
+            self._log.warning(
+                "generated_status_modified",
+                reason="digest_missing_or_mismatched",
+            )
+
+        ordered_tasks = sorted(tasks, key=lambda item: str(item.get("task_id", "")))
+        ordered_nodes = sorted(nodes, key=lambda item: str(item.get("node_id", "")))
+        completed = [task for task in ordered_tasks if task.get("status") == "DONE"]
+        remaining = [
+            task
+            for task in ordered_tasks
+            if task.get("status") not in {"DONE", "CANCELLED"}
+        ]
+        problems: list[tuple[str, str]] = []
+        for task in ordered_tasks:
+            for problem in task.get("progress", {}).get("problems", []) or []:
+                problems.append(
+                    (
+                        str(task.get("task_id", "")),
+                        json.dumps(problem, ensure_ascii=False, sort_keys=True),
+                    )
+                )
+
+        status_counts: dict[str, int] = {}
+        for task in ordered_tasks:
+            status = str(task.get("status", "UNKNOWN"))
+            status_counts[status] = status_counts.get(status, 0) + 1
+
+        owners: dict[str, list[str]] = {}
+        for task in ordered_tasks:
+            assignment = task.get("assignment") or {}
+            owner = assignment.get("node_id")
+            if owner:
+                owners.setdefault(str(owner), []).append(str(task.get("task_id", "")))
+
+        lines = [
+            "# MAF Project Status",
+            "",
+            ("> GENERATED FILE. Do not edit manually. Protocol: "
+             f"`{self._STATUS_PROTOCOL}`. Source: `.maf/tasks` and `.maf/nodes`."),
+            "",
+            "## Summary",
+            "",
+            f"- Total: {len(ordered_tasks)}",
+            f"- Completed: {len(completed)}",
+            f"- Remaining: {len(remaining)}",
+            "",
+            "| Status | Count |",
+            "| --- | ---: |",
+        ]
+        if status_counts:
+            lines.extend(f"| {status} | {status_counts[status]} |" for status in sorted(status_counts))
+        else:
+            lines.append("| NONE | 0 |")
+
+        lines.extend(["", "## Completed", ""])
+        lines.extend(
+            [f"- `{task['task_id']}` {task.get('title', '')}" for task in completed]
+            or ["- None"]
+        )
+        lines.extend(["", "## Remaining", ""])
+        lines.extend(
+            [
+                f"- `{task['task_id']}` [{task.get('status', 'UNKNOWN')}] {task.get('title', '')}"
+                for task in remaining
+            ]
+            or ["- None"]
+        )
+        lines.extend(["", "## Problems", ""])
+        lines.extend([f"- `{task_id}` {problem}" for task_id, problem in sorted(problems)] or ["- None"])
+        lines.extend(
+            [
+                "",
+                "## Node Utilization",
+                "",
+                "| Node | Status | Assigned | Capacity | Tasks |",
+                "| --- | --- | ---: | ---: | --- |",
+            ]
+        )
+        if ordered_nodes:
+            for node in ordered_nodes:
+                node_id = str(node.get("node_id", ""))
+                assigned = sorted(owners.get(node_id, []))
+                lines.append(
+                    f"| {node_id} | {node.get('status', 'UNKNOWN')} | {len(assigned)} | "
+                    f"{int(node.get('capacity', 0) or 0)} | {', '.join(assigned) or '-'} |"
+                )
+        else:
+            lines.append("| - | - | 0 | 0 | - |")
+
+        body = "\n".join(lines) + "\n"
+        digest = hashlib.sha256(body.encode("utf-8")).hexdigest()
+        marker = f"{self._STATUS_HASH_PREFIX}{digest} -->\n"
+        return lines[0] + "\n" + marker + "\n".join(lines[1:]) + "\n"
+
+    @classmethod
+    def status_digest_matches(cls, content: str) -> bool:
+        lines = content.splitlines(keepends=True)
+        if len(lines) < 2 or not lines[1].startswith(cls._STATUS_HASH_PREFIX):
+            return False
+        marker = lines[1].strip()
+        suffix = " -->"
+        if not marker.endswith(suffix):
+            return False
+        expected = marker[len(cls._STATUS_HASH_PREFIX) : -len(suffix)]
+        body = lines[0] + "".join(lines[2:])
+        actual = hashlib.sha256(body.encode("utf-8")).hexdigest()
+        return expected == actual
+
+    async def rebuild_projection(
+        self, project_id: str, *, repository: Any | None = None
+    ) -> str:
+        """Rebuild the SQLite projection from one atomic control snapshot."""
+        projector = repository or self._projection_repository
+        if projector is None:
+            raise UnsupportedOperationError(
+                "rebuild_projection requires a projection repository"
+            )
+        snapshot = await self.fetch_control(project_id)
+        return await projector.rebuild_projection(snapshot)
 
     # ------------------------------------------------------------------ #
     # TASK-019: discover_node_events / discover_all_node_events
@@ -1785,6 +2257,9 @@ class LocalGitCoordinationService:
         repository: EventConsumer,
         current_state: TaskState = TaskState.IN_PROGRESS,
         consumer_id: str = _DEFAULT_PROCESS_EVENT_CONSUMER_ID,
+        current_task: CoordinationTask | None = None,
+        current_control_commit: str | None = None,
+        submission_validator: Any | None = None,
     ) -> ProcessResult:
         """处理 ``PROGRESS_REPORTED`` / ``BLOCKED_REPORTED`` 事件（TASK-025）。
 
@@ -1937,12 +2412,37 @@ class LocalGitCoordinationService:
                 reason_code=epoch_result.reason_code,
             )
 
-        # 3. 事件分发：PROGRESS/BLOCKED 分别处理，其他类型拒绝（TASK-025 范围外）。
+        # 3. Validate the complete assignment fence when the authority record is
+        # available. Epoch is necessary but not sufficient: an event must also
+        # carry the current assignment_id, owner and control base.
         try:
+            if current_task is not None:
+                self._validate_current_assignment(
+                    event,
+                    current_task=current_task,
+                    current_control_commit=current_control_commit,
+                )
             if event.event_type == "PROGRESS_REPORTED":
                 new_state = self._handle_progress(event)
             elif event.event_type == "BLOCKED_REPORTED":
                 new_state = self._handle_blocked(event, current_state=current_state)
+            elif event.event_type == "SUBMISSION_CREATED":
+                if current_task is None or submission_validator is None:
+                    raise UnsupportedOperationError(
+                        "SUBMISSION_CREATED requires current_task and submission_validator"
+                    )
+                await submission_validator.validate_submission(
+                    event,
+                    current_task,
+                    current_control_commit=current_control_commit,
+                )
+                transition = self._state_service.apply_task_event(
+                    current_state,
+                    TaskEvent.SUBMISSION_ACCEPTED,
+                    actor=Actor.SCHEDULER,
+                    current_version=int(current_task.get("version", 1)),
+                )
+                new_state = transition.new_state
             else:
                 raise UnsupportedOperationError(
                     f"process_event(PROGRESS/BLOCKED) does not handle "
@@ -2006,6 +2506,27 @@ class LocalGitCoordinationService:
             error=None,
             reason_code=None,
         )
+
+    @staticmethod
+    def _validate_current_assignment(
+        event: CoordinationEventModel,
+        *,
+        current_task: CoordinationTask,
+        current_control_commit: str | None,
+    ) -> None:
+        assignment = current_task.get("assignment") or {}
+        if not assignment:
+            raise ValidationError("task has no current assignment")
+        if event.task_id != current_task.get("task_id"):
+            raise ValidationError("event task_id does not match current task")
+        if event.node_id != assignment.get("node_id"):
+            raise ValidationError("event node is not the current assignment owner")
+        if event.assignment_id != assignment.get("assignment_id"):
+            raise ValidationError("event assignment_id is stale or invalid")
+        if event.assignment_epoch != assignment.get("assignment_epoch"):
+            raise ValidationError("event assignment_epoch is stale or invalid")
+        if current_control_commit and event.based_on_control_commit != current_control_commit:
+            raise ValidationError("event is based on a stale control commit")
 
     def _handle_progress(
         self, event: CoordinationEventModel

@@ -1,0 +1,70 @@
+name: maf-demo
+
+services:
+  server:
+    build:
+      context: ../..
+      dockerfile: infra/docker/server.Dockerfile
+    environment:
+      MAF_ENV: dev
+      MAF_ORGANIZATION_ID: org-0001
+      MAF_DATA_DIR: /var/lib/maf
+      MAF_DATABASE_PATH: maf.db
+      MAF_CHECKPOINT_DATABASE_PATH: checkpoints.db
+      MAF_ARTIFACT_ROOT: artifacts
+      MAF_WORKSPACE_ROOT: workspaces
+      MAF_GIT_REPO_ROOT: repo
+      MAF_CONTROL_BRANCH: maf/control
+      MAF_PUBLIC_BASE_URL: http://server:8000
+      MAF_SECRET_KEY: local-compose-development-secret
+    volumes:
+      - maf-data:/var/lib/maf
+    ports:
+      - "8000:8000"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health')"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+
+  web:
+    build:
+      context: ../..
+      dockerfile: infra/docker/web.Dockerfile
+    depends_on:
+      server:
+        condition: service_healthy
+    ports:
+      - "8080:80"
+
+  runner:
+    build:
+      context: ../..
+      dockerfile: infra/docker/runner.Dockerfile
+    environment:
+      MAF_RUNNER_ID: node-demo
+      MAF_WORKSPACE_ROOT: /var/lib/maf/workspaces
+      MAF_MODEL_MAPPING_PATH: /var/lib/maf/model-mapping.json
+      MAF_CAPABILITY_TOKEN_CACHE_PATH: /var/lib/maf/capability-token.json
+      MAF_CONTROL_REMOTE_URL: ${MAF_CONTROL_REMOTE_URL:-}
+    command:
+      - sh
+      - -c
+      - >-
+        git -C /var/lib/maf/workspaces rev-parse --git-dir >/dev/null 2>&1
+        || git -C /var/lib/maf/workspaces init;
+        exec python -m maf_runner.main
+    volumes:
+      - maf-data:/var/lib/maf
+      - maf-runner-workspaces:/var/lib/maf/workspaces
+      - /var/run/docker.sock:/var/run/docker.sock
+    group_add:
+      - "0"
+    user: "maf"
+    depends_on:
+      server:
+        condition: service_healthy
+
+volumes:
+  maf-data:
+  maf-runner-workspaces:

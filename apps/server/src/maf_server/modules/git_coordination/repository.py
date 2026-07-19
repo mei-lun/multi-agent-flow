@@ -6,7 +6,7 @@ import hashlib
 import json
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Protocol
+from typing import Any, Protocol, cast
 
 import aiosqlite
 
@@ -36,6 +36,232 @@ class GitCoordinationRepository(Protocol):
     async def record_event_decision(self, event: CoordinationEvent, decision: EventDecision) -> None:
         """保存接受/拒绝决定和原因；同 event_id 不可产生不同决定。"""
         ...
+
+
+PROJECTION_SCHEMA_DDL = """\
+CREATE TABLE IF NOT EXISTS git_projector_state (
+    repository_binding_id     TEXT PRIMARY KEY,
+    control_branch            TEXT NOT NULL,
+    projected_control_commit  TEXT,
+    status                    TEXT NOT NULL,
+    last_error                TEXT,
+    updated_at                TEXT NOT NULL,
+    CHECK (status IN ('READY', 'SYNCING', 'ERROR', 'REBUILDING'))
+);
+
+CREATE TABLE IF NOT EXISTS git_coordination_tasks (
+    repository_binding_id  TEXT NOT NULL,
+    task_id                TEXT NOT NULL,
+    status                 TEXT NOT NULL,
+    owner_node_id          TEXT,
+    assignment_epoch       INTEGER,
+    payload_json           TEXT NOT NULL,
+    PRIMARY KEY (repository_binding_id, task_id)
+);
+
+CREATE TABLE IF NOT EXISTS git_coordination_nodes (
+    repository_binding_id  TEXT NOT NULL,
+    node_id                TEXT NOT NULL,
+    status                 TEXT NOT NULL,
+    payload_json           TEXT NOT NULL,
+    PRIMARY KEY (repository_binding_id, node_id)
+);
+
+CREATE TABLE IF NOT EXISTS git_coordination_events (
+    repository_binding_id  TEXT NOT NULL,
+    event_id               TEXT NOT NULL,
+    event_type             TEXT,
+    payload_json           TEXT NOT NULL,
+    PRIMARY KEY (repository_binding_id, event_id)
+);
+"""
+
+
+async def init_projection_schema(database: Database) -> None:
+    """Create the rebuildable Git projection tables idempotently."""
+    async with database.write_connection() as conn:
+        for statement in PROJECTION_SCHEMA_DDL.split(";"):
+            if statement.strip():
+                await conn.execute(statement)
+
+
+class SqliteGitCoordinationRepository:
+    """SQLite projection whose sole authority is a Git control snapshot.
+
+    Projection rows and the control watermark are replaced in one short
+    transaction. A failed write therefore leaves both the old rows and old
+    watermark intact, so replay can restart from the previous commit.
+    """
+
+    def __init__(self, database: Database, *, control_branch: str = "maf/control") -> None:
+        self._database = database
+        self._control_branch = control_branch
+
+    async def initialize(self) -> None:
+        await init_projection_schema(self._database)
+
+    async def get_projector_state(
+        self, repository_binding_id: str
+    ) -> ProjectorState | None:
+        async with self._database.read_connection() as conn:
+            async with conn.execute(
+                """SELECT repository_binding_id, control_branch,
+                          projected_control_commit, status, last_error, updated_at
+                   FROM git_projector_state WHERE repository_binding_id = ?""",
+                (repository_binding_id,),
+            ) as cursor:
+                row = await cursor.fetchone()
+        if row is None:
+            return None
+        return ProjectorState(
+            repository_binding_id=str(row[0]),
+            control_branch=str(row[1]),
+            projected_control_commit=cast(str | None, row[2]),
+            status=cast(Any, row[3]),
+            last_error=cast(str | None, row[4]),
+            updated_at=str(row[5]),
+        )
+
+    async def project_snapshot(
+        self,
+        snapshot: CoordinationSnapshot,
+        expected_previous_commit: str | None,
+    ) -> None:
+        binding_id = str(snapshot["project_id"])
+        commit = str(snapshot["control_commit"])
+        async with self._database.write_connection() as conn:
+            await self._replace_snapshot(
+                conn,
+                binding_id=binding_id,
+                snapshot=snapshot,
+                commit=commit,
+                expected_previous_commit=expected_previous_commit,
+                rebuilding=False,
+            )
+
+    async def rebuild_projection(self, snapshot: CoordinationSnapshot) -> str:
+        """Clear and rebuild one project's projection in a single transaction."""
+        binding_id = str(snapshot["project_id"])
+        commit = str(snapshot["control_commit"])
+        async with self._database.write_connection() as conn:
+            await self._replace_snapshot(
+                conn,
+                binding_id=binding_id,
+                snapshot=snapshot,
+                commit=commit,
+                expected_previous_commit=None,
+                rebuilding=True,
+            )
+        return commit
+
+    async def _replace_snapshot(
+        self,
+        conn: aiosqlite.Connection,
+        *,
+        binding_id: str,
+        snapshot: CoordinationSnapshot,
+        commit: str,
+        expected_previous_commit: str | None,
+        rebuilding: bool,
+    ) -> None:
+        async with conn.execute(
+            """SELECT projected_control_commit FROM git_projector_state
+               WHERE repository_binding_id = ?""",
+            (binding_id,),
+        ) as cursor:
+            state = await cursor.fetchone()
+        actual_previous = None if state is None else cast(str | None, state[0])
+        if not rebuilding and actual_previous != expected_previous_commit:
+            raise IdempotencyConflictError(
+                "projector control watermark changed",
+                context={
+                    "repository_binding_id": binding_id,
+                    "expected_previous_commit": expected_previous_commit,
+                    "actual_previous_commit": actual_previous,
+                },
+            )
+
+        for table in (
+            "git_coordination_tasks",
+            "git_coordination_nodes",
+            "git_coordination_events",
+        ):
+            await conn.execute(
+                f"DELETE FROM {table} WHERE repository_binding_id = ?",  # noqa: S608
+                (binding_id,),
+            )
+
+        tasks = sorted(snapshot.get("tasks", []), key=lambda item: str(item["task_id"]))
+        for task in tasks:
+            assignment = task.get("assignment") or {}
+            await conn.execute(
+                """INSERT INTO git_coordination_tasks
+                   (repository_binding_id, task_id, status, owner_node_id,
+                    assignment_epoch, payload_json)
+                   VALUES (?, ?, ?, ?, ?, ?)""",
+                (
+                    binding_id,
+                    str(task["task_id"]),
+                    str(task["status"]),
+                    assignment.get("node_id"),
+                    assignment.get("assignment_epoch"),
+                    _canonical_json(task),
+                ),
+            )
+
+        nodes = sorted(snapshot.get("nodes", []), key=lambda item: str(item["node_id"]))
+        for node in nodes:
+            await conn.execute(
+                """INSERT INTO git_coordination_nodes
+                   (repository_binding_id, node_id, status, payload_json)
+                   VALUES (?, ?, ?, ?)""",
+                (binding_id, str(node["node_id"]), str(node["status"]), _canonical_json(node)),
+            )
+
+        raw_snapshot = cast(dict[str, Any], snapshot)
+        events = list(raw_snapshot.get("events", []))
+        if not events:
+            events = [
+                {"event_id": path, "event_type": None, "path": path}
+                for path in raw_snapshot.get("events_paths", [])
+            ]
+        for event in sorted(events, key=lambda item: str(item["event_id"])):
+            await conn.execute(
+                """INSERT INTO git_coordination_events
+                   (repository_binding_id, event_id, event_type, payload_json)
+                   VALUES (?, ?, ?, ?)""",
+                (
+                    binding_id,
+                    str(event["event_id"]),
+                    event.get("event_type"),
+                    _canonical_json(event),
+                ),
+            )
+
+        # The watermark is deliberately the final statement in this transaction.
+        now = _now_iso()
+        await conn.execute(
+            """INSERT INTO git_projector_state
+               (repository_binding_id, control_branch, projected_control_commit,
+                status, last_error, updated_at)
+               VALUES (?, ?, ?, 'READY', NULL, ?)
+               ON CONFLICT(repository_binding_id) DO UPDATE SET
+                 control_branch = excluded.control_branch,
+                 projected_control_commit = excluded.projected_control_commit,
+                 status = 'READY', last_error = NULL, updated_at = excluded.updated_at""",
+            (binding_id, self._control_branch, commit, now),
+        )
+
+    async def list_projected_tasks(self, repository_binding_id: str) -> list[dict[str, Any]]:
+        """Read projected task payloads in deterministic order (query/test helper)."""
+        async with self._database.read_connection() as conn:
+            async with conn.execute(
+                """SELECT payload_json FROM git_coordination_tasks
+                   WHERE repository_binding_id = ? ORDER BY task_id""",
+                (repository_binding_id,),
+            ) as cursor:
+                rows = await cursor.fetchall()
+        return [cast(dict[str, Any], json.loads(str(row[0]))) for row in rows]
 
 
 # --------------------------------------------------------------------------- #
@@ -285,6 +511,10 @@ def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def _canonical_json(value: Any) -> str:
+    return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+
+
 __all__ = [
     "GitCoordinationRepository",
     "EventDecisionRepository",
@@ -297,4 +527,7 @@ __all__ = [
     "NO_CONTENT_HASH",
     "compute_event_content_hash",
     "init_event_decisions_schema",
+    "PROJECTION_SCHEMA_DDL",
+    "SqliteGitCoordinationRepository",
+    "init_projection_schema",
 ]

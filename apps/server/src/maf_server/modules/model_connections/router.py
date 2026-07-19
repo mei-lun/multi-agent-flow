@@ -24,12 +24,13 @@ from __future__ import annotations
 
 from typing import Protocol
 
-from fastapi import APIRouter, Depends, Query, Response, status
+from fastapi import APIRouter, Depends, Query, Request, Response, status
 from pydantic import BaseModel, Field
 from typing_extensions import Annotated
 
 from maf_contracts.common import ActorContext
 from maf_domain.errors import UnauthenticatedError
+from maf_server.api.dependencies import get_current_actor
 
 from .schemas import ModelConnectionView, TestResult
 from .service import ModelConnectionService
@@ -119,7 +120,7 @@ class ErrorResponse(BaseModel):
 # --------------------------------------------------------------------------- #
 
 
-async def _anonymous_actor_dependency() -> ActorContext:
+async def _anonymous_actor_dependency(request: Request) -> ActorContext:
     """占位依赖：解析当前 actor；正式实现在 ``api/dependencies.py``。
 
     TASK-037 范围内不实现完整认证中间件；本函数作为 FastAPI Depends 占位，
@@ -128,7 +129,7 @@ async def _anonymous_actor_dependency() -> ActorContext:
 
     测试通过 ``app.dependency_overrides`` 替换本函数注入 stub actor。
     """
-    raise UnauthenticatedError("未认证")
+    return await get_current_actor(request)
 
 
 ActorDep = Annotated[ActorContext, Depends(_anonymous_actor_dependency)]

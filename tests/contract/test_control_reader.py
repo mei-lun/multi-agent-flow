@@ -228,6 +228,54 @@ class TestSnapshotContainsControlFields:
         assert isinstance(snapshot["generated_at"], str)
         assert snapshot["generated_at"]  # 非空
 
+    def test_snapshot_parses_and_validates_task_and_node_documents(
+        self,
+        git_repo: Path,
+        git_cli: SubprocessGitCli,
+        templates_dir: Path,
+        schema_loader: SchemaLoader,
+    ) -> None:
+        """Control 快照包含已提交的 task/node 对象，而不是只返回路径。"""
+        service = _make_service(
+            git_cli=git_cli,
+            repository_path=str(git_repo),
+            templates_dir=templates_dir,
+            schema_loader=schema_loader,
+        )
+        _init_control(service, project_id="proj-objects-001")
+        _git(git_repo, "switch", "maf/control")
+        (git_repo / ".maf" / "tasks" / "TASK-001.yaml").write_text(
+            "schema_version: 1\n"
+            "task_id: TASK-001\n"
+            "title: First task\n"
+            "status: READY\n"
+            "requirements: {}\n"
+            "dependencies: []\n"
+            "assignment: null\n"
+            "progress: {}\n"
+            "delivery: {}\n"
+            "version: 1\n",
+            encoding="utf-8",
+        )
+        (git_repo / ".maf" / "nodes" / "node-aaaaaaaa.yaml").write_text(
+            "schema_version: 1\n"
+            "node_id: node-aaaaaaaa\n"
+            "display_name: Test node\n"
+            "git_identity:\n  name: Test Bot\n  email: bot@example.test\n"
+            "capabilities: []\n"
+            "capacity: 1\n"
+            "status: ACTIVE\n"
+            "version: 1\n",
+            encoding="utf-8",
+        )
+        _git(git_repo, "add", ".maf/tasks/TASK-001.yaml", ".maf/nodes/node-aaaaaaaa.yaml")
+        _git(git_repo, "commit", "-m", "test: add control objects")
+        _git(git_repo, "switch", "main")
+
+        snapshot = _run(service.fetch_control("proj-objects-001"))
+        assert [task["task_id"] for task in snapshot["tasks"]] == ["TASK-001"]
+        assert [node["node_id"] for node in snapshot["nodes"]] == ["node-aaaaaaaa"]
+
     def test_control_commit_matches_branch_head(
         self,
         git_repo: Path,

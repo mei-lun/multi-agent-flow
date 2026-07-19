@@ -20,7 +20,7 @@ from __future__ import annotations
 
 from typing import Any, Literal, Protocol
 
-from fastapi import APIRouter, Depends, HTTPException, Path, Response, status
+from fastapi import APIRouter, Depends, HTTPException, Path, Request, Response, status
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 from typing_extensions import Annotated
@@ -33,6 +33,7 @@ from maf_domain.errors import (
     PermissionDeniedError,
     UnauthenticatedError,
 )
+from maf_server.api.dependencies import get_current_actor
 
 from .schemas import (
     CapabilityDecisionView,
@@ -151,12 +152,12 @@ class ErrorResponse(BaseModel):
 # --------------------------------------------------------------------------- #
 
 
-async def _anonymous_actor_dependency() -> ActorContext:
+async def _anonymous_actor_dependency(request: Request) -> ActorContext:
     """占位 actor 依赖；正式认证中间件落地前由 ``app.dependency_overrides`` 覆盖。
 
     本函数永远抛 ``UnauthenticatedError``；测试通过依赖注入覆盖。
     """
-    raise UnauthenticatedError("未认证")
+    return await get_current_actor(request)
 
 
 ActorDep = Annotated[ActorContext, Depends(_anonymous_actor_dependency)]
@@ -178,6 +179,7 @@ class _StaticMetadataAdapter:
         from maf_tool_adapters import ToolMetadata
 
         self.adapter_type: str = metadata_payload.adapter_type
+        self.is_registration_descriptor = True
         self._metadata: ToolMetadata = ToolMetadata(
             name=metadata_payload.name,
             version=metadata_payload.version,

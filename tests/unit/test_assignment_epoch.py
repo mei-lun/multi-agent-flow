@@ -53,10 +53,12 @@ from maf_domain.errors import (  # noqa: E402
     ArgumentError,
     GitEventRejectedError,
     ReasonCode,
+    ValidationError,
 )
 from maf_server.modules.git_coordination.service import (  # noqa: E402
     AssignmentEpochError,
     AssignmentEpochStaleError,
+    LocalGitCoordinationService,
     check_assignment_epoch,
     validate_assignment_epoch,
 )
@@ -578,3 +580,42 @@ class TestEpochCheckResultImmutable:
         # 相同输入产生相同结果，可哈希且相等
         assert result1 == result2
         assert hash(result1) == hash(result2)
+
+
+class TestCompleteAssignmentFence:
+    def _task(self) -> dict[str, Any]:
+        return {
+            "task_id": _TASK_ID,
+            "assignment": {
+                "node_id": _NODE_ID_A,
+                "assignment_id": "asg-current",
+                "assignment_epoch": 2,
+                "based_on_control_commit": _CONTROL_COMMIT,
+            },
+        }
+
+    def test_current_owner_assignment_and_control_commit_pass(self) -> None:
+        event = _make_event(assignment_epoch=2, node_id=_NODE_ID_A)
+        event.assignment_id = "asg-current"
+        LocalGitCoordinationService._validate_current_assignment(
+            event,
+            current_task=self._task(),
+            current_control_commit=_CONTROL_COMMIT,
+        )
+
+    @pytest.mark.parametrize("field", ["owner", "assignment_id", "control_commit"])
+    def test_non_epoch_fence_mismatch_is_rejected(self, field: str) -> None:
+        event = _make_event(assignment_epoch=2, node_id=_NODE_ID_A)
+        event.assignment_id = "asg-current"
+        if field == "owner":
+            event.node_id = _NODE_ID_B
+        elif field == "assignment_id":
+            event.assignment_id = "asg-old"
+        else:
+            event.based_on_control_commit = "f" * 40
+        with pytest.raises(ValidationError):
+            LocalGitCoordinationService._validate_current_assignment(
+                event,
+                current_task=self._task(),
+                current_control_commit=_CONTROL_COMMIT,
+            )

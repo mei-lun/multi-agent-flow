@@ -10,8 +10,8 @@
 ## 禁止改动
 - 未列出的文件、接口、数据库表、API 路径和 Git Schema。
 ## 验收标准
-- [ ] 额外本机能力不会进入上下文。
-- [ ] control commit、assignment epoch、base/hash 全部校验。
-- [ ] 大输入只放索引/按需读取句柄。
+- [x] 额外本机能力不会进入上下文。
+- [x] control commit、assignment epoch、base/hash 全部校验。
+- [x] 大输入只放索引/按需读取句柄。
 ## 不包含
 - Agent 循环。

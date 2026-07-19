@@ -28,6 +28,7 @@ from typing_extensions import Annotated
 
 from maf_contracts.common import ActorContext
 from maf_domain.errors import UnauthenticatedError
+from maf_server.api.dependencies import get_current_actor
 
 from .schemas import (
     CreateUserRequest,
@@ -143,6 +144,7 @@ class IamHttpApi(Protocol):
 
 
 async def _anonymous_actor_dependency(
+    request: Request,
     maf_session: Annotated[str | None, Cookie()] = None,
 ) -> ActorContext:
     """从 ``maf_session`` Cookie 解析当前 actor。
@@ -154,7 +156,7 @@ async def _anonymous_actor_dependency(
 
     测试通过 ``app.dependency_overrides`` 替换本函数注入 stub actor。
     """
-    raise UnauthenticatedError("未认证")
+    return await get_current_actor(request)
 
 
 ActorDep = Annotated[ActorContext, Depends(_anonymous_actor_dependency)]
@@ -436,6 +438,18 @@ def build_settings_router(service: IamSettingsApi) -> APIRouter:
     return router
 
 
+def build_current_user_router(service: IamServiceLike) -> APIRouter:
+    """Expose the authenticated user's current profile and permissions."""
+
+    router = APIRouter(prefix="/api/v1", tags=["iam"])
+
+    @router.get("/me", response_model=UserOut)
+    async def get_me(actor: ActorDep) -> UserOut:
+        return UserOut(**(await service.get_current_user(actor)))
+
+    return router
+
+
 __all__ = [
     "IamHttpApi",
     "IamSettingsApi",
@@ -446,5 +460,6 @@ __all__ = [
     "UserOut",
     "SESSION_COOKIE_NAME",
     "build_auth_router",
+    "build_current_user_router",
     "build_settings_router",
 ]

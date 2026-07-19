@@ -262,8 +262,13 @@ def _push_event_directly(
         subprocess.run(
             [
                 "git", "-C", str(local), "worktree", "add",
-                "--orphan", "-b", branch, str(wt),
+                "--detach", str(wt), "HEAD",
             ],
+            check=True,
+            env=_GIT_ENV,
+        )
+        subprocess.run(
+            ["git", "-C", str(wt), "switch", "--orphan", branch],
             check=True,
             env=_GIT_ENV,
         )

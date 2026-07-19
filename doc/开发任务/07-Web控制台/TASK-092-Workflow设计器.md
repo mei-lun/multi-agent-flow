@@ -10,8 +10,8 @@
 ## 禁止改动
 - 未列出的文件、接口、数据库表、API 路径和 Git Schema。
 ## 验收标准
-- [ ] 保存携带 expected_version。
-- [ ] 校验错误可定位并聚焦节点/边。
-- [ ] 发布前显示 Role/Contract/返工依赖摘要。
+- [x] 保存携带 expected_version。
+- [x] 校验错误可定位并聚焦节点/边。
+- [x] 发布前显示 Role/Contract/返工依赖摘要。
 ## 不包含
 - Run 实时监控。

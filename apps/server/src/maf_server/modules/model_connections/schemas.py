@@ -20,7 +20,18 @@ from typing import Literal, TypedDict
 # --------------------------------------------------------------------------- #
 
 #: 支持的模型供应商。``local`` 表示本地推理端点（如 Ollama）。
-ALLOWED_PROVIDERS: tuple[str, ...] = ("openai", "anthropic", "azure", "local")
+ALLOWED_PROVIDERS: tuple[str, ...] = (
+    "openai",
+    "codex",
+    "openai_compatible",
+    "glm",
+    "deepseek",
+    "minimax",
+    "kimi_code",
+    "anthropic",
+    "azure",
+    "local",
+)
 
 #: 支持的凭据类型。
 ALLOWED_CREDENTIAL_TYPES: tuple[str, ...] = (
@@ -37,7 +48,18 @@ STATUS_VERIFIED: str = "VERIFIED"
 STATUS_ERROR: str = "ERROR"
 
 
-Provider = Literal["openai", "anthropic", "azure", "local"]
+Provider = Literal[
+    "openai",
+    "codex",
+    "openai_compatible",
+    "glm",
+    "deepseek",
+    "minimax",
+    "kimi_code",
+    "anthropic",
+    "azure",
+    "local",
+]
 CredentialType = Literal["api_key", "oauth_token", "bearer_token"]
 ConnectionStatus = Literal["UNVERIFIED", "VERIFIED", "ERROR"]
 

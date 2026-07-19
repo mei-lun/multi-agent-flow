@@ -279,6 +279,9 @@ class NodeSettings(BaseSettings):
     @model_validator(mode="after")
     def _resolve_and_confine_paths(self) -> NodeSettings:
         root = self.workspace_root.resolve()
+        self.model_mapping_path = self._confine(
+            self.model_mapping_path, root, "model_mapping_path"
+        )
         self.capability_token_cache_path = self._confine(
             self.capability_token_cache_path, root, "capability_token_cache_path"
         )

@@ -117,9 +117,24 @@ class CommandResult(TypedDict):
     run_version: int
 
 
+class RunSnapshot(TypedDict):
+    project: dict[str, Any]
+    project_input: dict[str, Any]
+    repository_binding: dict[str, Any] | None
+    workflow_version: dict[str, Any]
+    workflow_graph: dict[str, Any]
+    role_versions: list[dict[str, Any]]
+    skill_versions: list[dict[str, Any]]
+    tool_versions: list[dict[str, Any]]
+    model_policies: list[dict[str, Any]]
+    control_base_commit: str
+    limits: RunLimits
+    created_by: str
+    created_at: str
+
+
 class TaskQuery(TypedDict, total=False):
     cursor: str
     limit: int
     status: str
     node_key: str
-

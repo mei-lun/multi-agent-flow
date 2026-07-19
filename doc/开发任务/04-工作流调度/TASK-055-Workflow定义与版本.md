@@ -10,8 +10,8 @@
 ## 禁止改动
 - 未列出的文件、接口、数据库表、API 路径和 Git Schema。
 ## 验收标准
-- [ ] Definition key 唯一。
-- [ ] 复制后新旧版本独立。
-- [ ] PUBLISHED 版本不能修改。
+- [x] Definition key 唯一。
+- [x] 复制后新旧版本独立。
+- [x] PUBLISHED 版本不能修改。
 ## 不包含
 - Graph 编辑。

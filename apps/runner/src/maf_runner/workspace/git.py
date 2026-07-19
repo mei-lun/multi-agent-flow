@@ -15,10 +15,13 @@
 
 from __future__ import annotations
 
+import re
+import shutil
 from pathlib import Path
 from typing import TYPE_CHECKING, Protocol
 
 from maf_repository_adapters import SubprocessGitCli
+from maf_runner.security.boundaries import BoundaryViolation, LocalBoundaryValidator
 
 if TYPE_CHECKING:
     from maf_runner.config import NodeSettings
@@ -29,14 +32,108 @@ class GitWorkspace(Protocol):
         """在新目录导入 bundle/archive，校验 commit/tree，创建本地 worktree；不配置远端凭据。"""
         ...
 
+
+class LocalGitWorkspace:
+    """Concrete isolated clone workspace for one assignment epoch."""
+
+    def __init__(
+        self,
+        *,
+        git_cli: object,
+        workspace_root: Path,
+        node_id: str,
+        assignment_epoch: int,
+    ) -> None:
+        self._git = git_cli
+        self._root = Path(workspace_root).resolve()
+        self._root.mkdir(parents=True, exist_ok=True)
+        self._node_id = node_id
+        self._epoch = assignment_epoch
+        self._validator = LocalBoundaryValidator()
+        self._writable: dict[str, tuple[str, ...]] = {}
+
+    async def _run(self, cwd: Path, args: list[str]) -> str:
+        result = await self._git.run(str(cwd), args, 0)
+        rc, out, err = result
+        if rc != 0:
+            raise RuntimeError(f"git {' '.join(args[:2])} failed: {err.strip()}")
+        return out.strip()
+
+    async def prepare(
+        self,
+        job_id: str,
+        source_artifact_version_id: str,
+        base_commit: str,
+        expected_tree_hash: str,
+        writable_subpaths: list[str],
+    ) -> str:
+        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}", job_id):
+            raise BoundaryViolation("unsafe job_id")
+        if self._epoch < 1 or not self._node_id:
+            raise BoundaryViolation("node_id and positive assignment epoch are required")
+        workspace = Path(
+            self._validator.require_workspace_path(str(self._root), f"git-{job_id}-{self._epoch}")
+        )
+        if workspace.exists():
+            shutil.rmtree(workspace)
+        source_path = Path(source_artifact_version_id).expanduser()
+        if source_path.is_symlink():
+            raise BoundaryViolation("source repository may not be a symlink")
+        source = source_path.resolve()
+        if not source.is_dir():
+            raise BoundaryViolation("source repository does not exist")
+        await self._run(self._root, ["clone", "--no-checkout", str(source), str(workspace)])
+        await self._run(workspace, ["checkout", "--detach", base_commit])
+        actual_tree = await self._run(workspace, ["rev-parse", f"{base_commit}^{{tree}}"])
+        if expected_tree_hash and actual_tree != expected_tree_hash:
+            shutil.rmtree(workspace)
+            raise BoundaryViolation("base commit tree hash does not match assignment")
+        branch = f"maf/task/{job_id}/{self._epoch}/{self._node_id}"
+        await self._run(workspace, ["switch", "-c", branch])
+        normalized: list[str] = []
+        for relative in writable_subpaths:
+            path = Path(self._validator.require_workspace_path(str(workspace), relative))
+            normalized.append(path.relative_to(workspace).as_posix())
+        self._writable[str(workspace)] = tuple(normalized)
+        return str(workspace)
+
     async def collect(self, workspace_path: str) -> dict:
-        """检查改动未越过允许路径，生成 Patch、可选 bundle、producer commit 和 tree hash。"""
-        ...
+        workspace = Path(self._validator.require_workspace_path(str(self._root), workspace_path))
+        allowed = self._writable.get(str(workspace), ())
+        # 展开未跟踪目录，否则 porcelain 默认只报告 ``?? outputs/``，会丢失
+        # 实际发生变更的文件路径并削弱 writable_subpaths 审计精度。
+        status = await self._run(
+            workspace,
+            ["status", "--porcelain", "--untracked-files=all"],
+        )
+        changed: list[str] = []
+        for line in status.splitlines():
+            if not line:
+                continue
+            path = line[3:].strip().split(" -> ")[-1]
+            candidate = Path(self._validator.require_workspace_path(str(workspace), path))
+            relative = candidate.relative_to(workspace).as_posix()
+            if allowed and not any(relative == prefix or relative.startswith(f"{prefix}/") for prefix in allowed):
+                raise BoundaryViolation(f"changed path is outside writable grant: {relative}")
+            changed.append(relative)
+        head = await self._run(workspace, ["rev-parse", "HEAD"])
+        tree = await self._run(workspace, ["rev-parse", "HEAD^{tree}"])
+        branch = await self._run(workspace, ["rev-parse", "--abbrev-ref", "HEAD"])
+        return {
+            "workspace_path": str(workspace),
+            "branch": branch,
+            "head_commit": head,
+            "tree_hash": tree,
+            "changed_paths": sorted(set(changed)),
+        }
 
     async def cleanup(self, workspace_path: str) -> None:
-        """路径必须在 Runner workspace root，清理前停止使用它的容器。"""
-        ...
-
+        workspace = Path(self._validator.require_workspace_path(str(self._root), workspace_path))
+        if workspace == self._root:
+            raise BoundaryViolation("refusing to delete workspace root")
+        self._writable.pop(str(workspace), None)
+        if workspace.exists():
+            shutil.rmtree(workspace)
 
 #: 节点凭据 token 注入的环境变量名。平台私有，由节点 askpass helper
 #: （TASK-014 实现）读取。该变量值是 SecretStr，绝不进入命令行参数或日志。
@@ -112,4 +209,4 @@ class RunnerGitCli:
         return await self._inner.run(repository_path, arguments, timeout_seconds)
 
 
-__all__ = ["GitWorkspace", "RunnerGitCli"]
+__all__ = ["GitWorkspace", "LocalGitWorkspace", "RunnerGitCli"]

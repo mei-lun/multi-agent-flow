@@ -10,8 +10,8 @@
 ## 禁止改动
 - 未列出的文件、接口、数据库表、API 路径和 Git Schema。
 ## 验收标准
-- [ ] Schema 无效或 Native 未在白名单时拒绝。
-- [ ] 风险/Adapter/Schema 变化创建新版本。
-- [ ] 注册过程不执行 Tool。
+- [x] Schema 无效或 Native 未在白名单时拒绝。
+- [x] 风险/Adapter/Schema 变化创建新版本。
+- [x] 注册过程不执行 Tool。
 ## 不包含
 - Tool 调用。

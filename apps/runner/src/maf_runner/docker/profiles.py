@@ -72,6 +72,16 @@ _PROFILE_GENERIC: Final[str] = "generic"
 _PROFILE_GIT_WORKSPACE: Final[str] = "git-workspace"
 
 
+def _memory_bytes(value: str) -> int:
+    raw = str(value).strip().lower()
+    units = {"b": 1, "k": 1024, "kb": 1024, "m": 1024**2, "mb": 1024**2,
+             "g": 1024**3, "gb": 1024**3}
+    for suffix, multiplier in sorted(units.items(), key=lambda item: -len(item[0])):
+        if raw.endswith(suffix):
+            return int(float(raw[:-len(suffix)]) * multiplier)
+    return int(raw)
+
+
 # --------------------------------------------------------------------------- #
 # DockerProfile dataclass
 # --------------------------------------------------------------------------- #
@@ -228,6 +238,24 @@ class DockerProfileRegistry:
             security_opts=list(original.security_opts),
             mounts=list(original.mounts),
         )
+
+    def constrain(self, name: str, *, memory_limit: str | None = None,
+                  cpu_quota: int | None = None, capabilities: list[str] | None = None) -> DockerProfile:
+        """返回只能收紧资源的 profile 副本。
+
+        任务声明不能提高内存/CPU，也不能追加 Linux capability；空值表示沿用已发布值。
+        """
+        original = self.resolve(name)
+        if memory_limit is not None and _memory_bytes(memory_limit) > _memory_bytes(original.memory_limit):
+            raise ValueError("task may not increase memory limit")
+        if cpu_quota is not None and cpu_quota > original.cpu_quota:
+            raise ValueError("task may not increase cpu quota")
+        if capabilities:
+            if not set(capabilities).issubset(set(original.capabilities)):
+                raise ValueError("task may not add capabilities")
+        return replace(original, memory_limit=memory_limit or original.memory_limit,
+                       cpu_quota=cpu_quota or original.cpu_quota,
+                       capabilities=list(capabilities or original.capabilities))
 
     def list_profiles(self) -> list[str]:
         """返回所有已注册 Profile 名称（按字母序）。"""

@@ -10,8 +10,8 @@
 ## 禁止改动
 - 未列出的文件、接口、数据库表、API 路径和 Git Schema。
 ## 验收标准
-- [ ] 不为每个模型增量创建 Git commit。
-- [ ] 事件包含完成/剩余/问题/head/测试摘要。
-- [ ] Key、Prompt 思考和高频日志不进入 Git。
+- [x] 不为每个模型增量创建 Git commit。
+- [x] 事件包含完成/剩余/问题/head/测试摘要。
+- [x] Key、Prompt 思考和高频日志不进入 Git。
 ## 不包含
 - status.md 生成。

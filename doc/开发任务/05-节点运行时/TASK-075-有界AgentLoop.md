@@ -10,8 +10,8 @@
 ## 禁止改动
 - 未列出的文件、接口、数据库表、API 路径和 Git Schema。
 ## 验收标准
-- [ ] 步数、Tool 次数、时间、token 和费用上限生效。
-- [ ] 未授权 Tool 不进入模型 Schema。
-- [ ] 无无限自动重试；输出先按 Contract 预校验。
+- [x] 步数、Tool 次数、时间、token 和费用上限生效。
+- [x] 未授权 Tool 不进入模型 Schema。
+- [x] 无无限自动重试；输出先按 Contract 预校验。
 ## 不包含
 - 中央质量 Gate。

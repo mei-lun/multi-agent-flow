@@ -33,6 +33,8 @@ class WorkflowVersionView(TypedDict):
     graph_hash: str | None
     validation_status: Literal["NOT_RUN", "PASS", "FAIL"]
     content_hash: str | None
+    revision: NotRequired[int]
+    change_summary: NotRequired[str]
 
 
 class WorkflowNode(TypedDict):
@@ -86,4 +88,4 @@ class WorkflowDiff(TypedDict):
     changed_nodes: list[dict[str, Any]]
     added_edges: list[str]
     removed_edges: list[str]
-
+    changed_edges: NotRequired[list[dict[str, Any]]]

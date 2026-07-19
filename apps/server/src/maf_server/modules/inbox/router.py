@@ -19,11 +19,12 @@ from __future__ import annotations
 
 from typing import Any, Protocol
 
-from fastapi import APIRouter, Body, Depends, Query, status
+from fastapi import APIRouter, Body, Depends, Query, Request, status
 from pydantic import BaseModel, Field
 from typing_extensions import Annotated
 
 from maf_contracts.common import ActorContext
+from maf_server.api.dependencies import get_current_actor
 
 from .schemas import (
     InboxDecision,
@@ -165,14 +166,9 @@ class InboxServiceLike(Protocol):
 # --------------------------------------------------------------------------- #
 
 
-async def _anonymous_actor_dependency() -> ActorContext:
+async def _anonymous_actor_dependency(request: Request) -> ActorContext:
     """占位 actor 依赖；正式实现应解析 Cookie/Authorization 构造 ActorContext。"""
-    return ActorContext(
-        user_id="",
-        organization_id="system",
-        permission_keys=[],
-        trace_id="",
-    )
+    return await get_current_actor(request)
 
 
 ActorDep = Annotated[ActorContext, Depends(_anonymous_actor_dependency)]

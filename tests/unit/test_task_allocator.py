@@ -176,14 +176,10 @@ class TestDeterminism:
         assert decision_a["task_id"] == "TASK-001"
         assert decision_a["assignment_epoch"] == 1
 
-    def test_same_allocator_called_twace_with_same_snapshot_returns_same_task_id(
+    def test_same_allocator_accepts_only_one_owner_for_same_control_snapshot(
         self,
     ) -> None:
-        """同一 allocator 对同一 snapshot 调用两次，task_id 相同（epoch 递增是设计）。
-
-        注意：``assignment_epoch`` 必须递增（每次成功分配 +1，用于 fencing），
-        但 ``task_id`` 选择是确定性的（相同 snapshot 选同一个 task）。
-        """
+        """同一 control commit 上的任务只能接受一个当前 owner。"""
         task = _make_task(task_id="TASK-001", priority=5, required_capabilities=["python"])
         snapshot = _make_snapshot(tasks=[task])
         # 第二个 snapshot 内容相同（独立 dict，避免引用别名干扰）。
@@ -196,11 +192,11 @@ class TestDeterminism:
         first = allocator.choose_claim(snapshot, _NODE_ID_A, manifest)
         second = allocator.choose_claim(snapshot_2, _NODE_ID_A, manifest)
 
-        # task_id 选择确定性：两次都选 TASK-001（snapshot 内容相同）。
         assert first["task_id"] == "TASK-001"
-        assert second["task_id"] == "TASK-001"
-        # epoch 单调递增（验收 7）。
-        assert second["assignment_epoch"] == first["assignment_epoch"] + 1
+        assert first["accepted"] is True
+        assert second["task_id"] is None
+        assert second["accepted"] is False
+        assert second["reason_code"] == "no_matching_tasks"
 
     def test_selection_independent_of_task_list_order(self) -> None:
         """候选任务的输入顺序不影响选择结果（确定性排序）。"""
@@ -624,6 +620,10 @@ class TestNoMatchingTasks:
             "node_id",
             "reason",
             "assignment_epoch",
+            "accepted",
+            "reason_code",
+            "assignment_id",
+            "assignment",
         }
         assert decision["task_id"] is None
         assert decision["node_id"] == _NODE_ID_A
@@ -652,8 +652,11 @@ class TestAssignmentEpochIncrement:
 
     def test_epoch_increments_on_each_successful_assignment(self) -> None:
         """每次成功分配 epoch 递增 1。"""
-        task = _make_task(task_id="TASK-001", required_capabilities=[])
-        snapshot = _make_snapshot(tasks=[task])
+        snapshot = _make_snapshot(tasks=[
+            _make_task(task_id="TASK-001", required_capabilities=[]),
+            _make_task(task_id="TASK-002", required_capabilities=[]),
+            _make_task(task_id="TASK-003", required_capabilities=[]),
+        ])
         manifest = _make_manifest(capabilities=["python"])
 
         allocator = TaskAllocator()
@@ -667,9 +670,11 @@ class TestAssignmentEpochIncrement:
 
     def test_epoch_monotonically_increasing(self) -> None:
         """epoch 序列严格单调递增（每个 > 前一个）。"""
-        task = _make_task(task_id="TASK-001", required_capabilities=[])
-        snapshot = _make_snapshot(tasks=[task])
-        manifest = _make_manifest(capabilities=["python"])
+        snapshot = _make_snapshot(tasks=[
+            _make_task(task_id=f"TASK-{index:03d}", required_capabilities=[])
+            for index in range(5)
+        ])
+        manifest = _make_manifest(capabilities=["python"], capacity=5)
 
         allocator = TaskAllocator()
         epochs = [
@@ -719,11 +724,8 @@ class TestAssignmentEpochIncrement:
         with pytest.raises(ArgumentError, match="initial_epoch"):
             TaskAllocator(initial_epoch=-1)
 
-    def test_epoch_shared_across_nodes(self) -> None:
-        """epoch 是 allocator 实例全局状态，跨节点也单调递增（用于 fencing）。
-
-        场景：节点 A 与节点 B 共享同一 allocator（中央调度器），epoch 全局递增。
-        """
+    def test_second_node_cannot_take_reserved_task(self) -> None:
+        """同一 control commit 中第二个节点不能覆盖首个 owner。"""
         task = _make_task(task_id="TASK-001", required_capabilities=[])
         snapshot = _make_snapshot(tasks=[task])
         manifest_a = _make_manifest(node_id=_NODE_ID_A, capabilities=["python"])
@@ -734,7 +736,8 @@ class TestAssignmentEpochIncrement:
         d_b = allocator.choose_claim(snapshot, _NODE_ID_B, manifest_b)
 
         assert d_a["assignment_epoch"] == 1
-        assert d_b["assignment_epoch"] == 2  # 全局递增，跨节点也单调
+        assert d_b["assignment_epoch"] is None
+        assert d_b["reason_code"] == "no_matching_tasks"
 
     def test_next_assignment_epoch_property(self) -> None:
         """``next_assignment_epoch`` 属性反映下一次分配的 epoch 值。"""
@@ -749,7 +752,7 @@ class TestAssignmentEpochIncrement:
         assert allocator.next_assignment_epoch == 2
 
         allocator.choose_claim(snapshot, _NODE_ID_A, manifest)
-        assert allocator.next_assignment_epoch == 3
+        assert allocator.next_assignment_epoch == 2
 
 
 # --------------------------------------------------------------------------- #
@@ -929,7 +932,11 @@ class TestClaimDecisionStructure:
             "task_id",
             "node_id",
             "reason",
+            "reason_code",
+            "accepted",
             "assignment_epoch",
+            "assignment_id",
+            "assignment",
         }
         assert decision["task_id"] == "TASK-001"
         assert decision["node_id"] == _NODE_ID_A
@@ -955,6 +962,61 @@ class TestClaimDecisionStructure:
         assert no_match["reason"] == "no_matching_tasks"
 
 
+class TestClaimAuthorityConstraints:
+    def test_dependency_must_be_done(self) -> None:
+        blocked = _make_task(
+            task_id="TASK-002", required_capabilities=[], dependencies=["TASK-001"]
+        )
+        dependency = _make_task(task_id="TASK-001", status="IN_PROGRESS")
+        decision = TaskAllocator().choose_claim(
+            _make_snapshot(tasks=[blocked, dependency]),
+            _NODE_ID_A,
+            _make_manifest(),
+        )
+        assert decision["accepted"] is False
+        assert decision["reason_code"] == "no_matching_tasks"
+
+    def test_inactive_node_and_capacity_are_rejected_with_reason_codes(self) -> None:
+        snapshot = _make_snapshot(tasks=[_make_task(required_capabilities=[])])
+        inactive = TaskAllocator().choose_claim(
+            snapshot, _NODE_ID_A, _make_manifest(status="DRAINING")
+        )
+        assert inactive["reason_code"] == "node_unavailable"
+
+        full_assignment = {
+            "node_id": _NODE_ID_A,
+            "assignment_id": "asg-current",
+            "assignment_epoch": 1,
+            "assigned_at": "2026-07-19T00:00:00Z",
+            "expires_at": "2026-07-19T01:00:00Z",
+            "based_on_control_commit": _CONTROL_COMMIT,
+        }
+        full = _make_task(
+            task_id="TASK-ACTIVE", status="IN_PROGRESS", assignment=full_assignment
+        )
+        ready = _make_task(task_id="TASK-READY", required_capabilities=[])
+        capacity = TaskAllocator().choose_claim(
+            _make_snapshot(tasks=[full, ready]),
+            _NODE_ID_A,
+            _make_manifest(capacity=1),
+        )
+        assert capacity["reason_code"] == "node_at_capacity"
+
+    def test_granted_assignment_is_deterministic_and_fenced(self) -> None:
+        decision = TaskAllocator(initial_epoch=4).choose_claim(
+            _make_snapshot(tasks=[_make_task(required_capabilities=[])]),
+            _NODE_ID_A,
+            _make_manifest(),
+        )
+        assert decision["reason_code"] == "claim_granted"
+        assert decision["assignment"] == {
+            "node_id": _NODE_ID_A,
+            "assignment_id": decision["assignment_id"],
+            "assignment_epoch": 5,
+            "based_on_control_commit": _CONTROL_COMMIT,
+        }
+
+
 # --------------------------------------------------------------------------- #
 # 跨实例独立性
 # --------------------------------------------------------------------------- #
@@ -973,14 +1035,16 @@ class TestAllocatorIsolation:
         allocator_b = TaskAllocator()
 
         d_a1 = allocator_a.choose_claim(snapshot, _NODE_ID_A, manifest)
-        d_b1 = allocator_b.choose_claim(snapshot, _NODE_ID_B, manifest)
+        manifest_b = dict(manifest)
+        manifest_b["node_id"] = _NODE_ID_B
+        d_b1 = allocator_b.choose_claim(snapshot, _NODE_ID_B, manifest_b)
         d_a2 = allocator_a.choose_claim(snapshot, _NODE_ID_A, manifest)
 
         # 两个 allocator 各自从 1 开始。
         assert d_a1["assignment_epoch"] == 1
         assert d_b1["assignment_epoch"] == 1
-        # allocator_a 第二次分配 epoch=2。
-        assert d_a2["assignment_epoch"] == 2
+        # allocator_a 已保留此任务 owner，第二次请求被拒绝且不增加 epoch。
+        assert d_a2["assignment_epoch"] is None
 
     def test_allocator_with_custom_initial_epoch_isolates(self) -> None:
         """``initial_epoch`` 不同的两个 allocator 独立计数。"""

@@ -8,28 +8,93 @@ TASK-066 扩展：增加 ``SecurityBaseline`` Protocol 与 ``LocalSecurityBaseli
 from __future__ import annotations
 
 import os
+import ipaddress
+import socket
 import stat
 import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
+from urllib.parse import urlparse
 
 
 class BoundaryValidator(Protocol):
     def require_workspace_path(self, workspace_root: str, candidate: str) -> str:
         """解析链接和规范化路径，返回安全绝对路径；不在 root 内则抛边界错误。"""
         ...
-    def require_allowed_command(self, executable: str, arguments: list[str], grant: dict) -> None:
-        """按结构化 executable/arguments 校验，禁止 Shell 拼接和未授权子命令。"""
-        ...
+
+
+class BoundaryViolation(ValueError):
+    """Untrusted task input crossed a local execution boundary."""
+
+
+class LocalBoundaryValidator:
+    """Deterministic local implementation of the task grant boundaries."""
+
+    def require_workspace_path(self, workspace_root: str, candidate: str) -> str:
+        root = Path(workspace_root).expanduser().resolve()
+        raw = Path(candidate).expanduser()
+        path = (raw if raw.is_absolute() else root / raw).resolve()
+        try:
+            path.relative_to(root)
+        except ValueError as exc:
+            raise BoundaryViolation(f"path escapes workspace root: {candidate}") from exc
+        return str(path)
+
+    def require_allowed_command(
+        self, executable: str, arguments: list[str], grant: dict
+    ) -> None:
+        allowed = {str(item) for item in grant.get("allowed_executables", [])}
+        if executable not in allowed:
+            raise BoundaryViolation(f"executable is not granted: {executable}")
+        if not isinstance(arguments, list) or any(not isinstance(arg, str) for arg in arguments):
+            raise BoundaryViolation("command arguments must be a list of strings")
+        if any("\x00" in arg or "\n" in arg or "\r" in arg for arg in arguments):
+            raise BoundaryViolation("command argument contains a control character")
+        denied = {str(item) for item in grant.get("denied_arguments", [])}
+        if denied.intersection(arguments):
+            raise BoundaryViolation("command contains a denied argument")
+
     def require_allowed_url(self, url: str, grant: dict) -> str:
-        """验证 scheme/host/port/DNS 结果/重定向，拒绝 loopback、link-local 和私网绕过。"""
-        ...
+        parsed = urlparse(url)
+        if parsed.scheme not in set(grant.get("allowed_schemes", ["https"])):
+            raise BoundaryViolation("URL scheme is not allowed")
+        host = (parsed.hostname or "").rstrip(".").lower()
+        if not host or parsed.username or parsed.password:
+            raise BoundaryViolation("URL host is missing or contains credentials")
+        allowed_hosts = {str(item).rstrip(".").lower() for item in grant.get("allowed_hosts", [])}
+        if allowed_hosts and host not in allowed_hosts:
+            raise BoundaryViolation(f"URL host is not granted: {host}")
+        port = parsed.port or (443 if parsed.scheme == "https" else 80)
+        allowed_ports = {int(item) for item in grant.get("allowed_ports", [443])}
+        if port not in allowed_ports:
+            raise BoundaryViolation(f"URL port is not granted: {port}")
+        try:
+            addresses = {item[4][0] for item in socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)}
+        except socket.gaierror as exc:
+            raise BoundaryViolation(f"URL host cannot be resolved: {host}") from exc
+        if not addresses:
+            raise BoundaryViolation("URL host resolved to no addresses")
+        for address in addresses:
+            ip = ipaddress.ip_address(address)
+            if (
+                ip.is_private
+                or ip.is_loopback
+                or ip.is_link_local
+                or ip.is_multicast
+                or ip.is_reserved
+                or ip.is_unspecified
+            ):
+                raise BoundaryViolation(f"URL resolves to a forbidden address: {ip}")
+        return parsed.geturl()
+
     def require_output_limits(self, path_count: int, total_bytes: int, grant: dict) -> None:
-        """超过文件数或字节上限立即拒绝打包。"""
-        ...
-
-
+        max_paths = int(grant.get("max_output_files", 1000))
+        max_bytes = int(grant.get("max_output_bytes", 100 * 1024 * 1024))
+        if path_count < 0 or path_count > max_paths:
+            raise BoundaryViolation(f"output file count exceeds limit: {path_count}/{max_paths}")
+        if total_bytes < 0 or total_bytes > max_bytes:
+            raise BoundaryViolation(f"output byte size exceeds limit: {total_bytes}/{max_bytes}")
 # --------------------------------------------------------------------------- #
 # TASK-066: 安全基线检查
 # --------------------------------------------------------------------------- #
@@ -178,7 +243,9 @@ class LocalSecurityBaseline:
 
 __all__ = [
     "BaselineCheckResult",
+    "BoundaryViolation",
     "BoundaryValidator",
+    "LocalBoundaryValidator",
     "LocalSecurityBaseline",
     "SecurityBaseline",
 ]

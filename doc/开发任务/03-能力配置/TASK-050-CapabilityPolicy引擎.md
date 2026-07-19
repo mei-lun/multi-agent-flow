@@ -10,8 +10,8 @@
 ## 禁止改动
 - 未列出的文件、接口、数据库表、API 路径和 Git Schema。
 ## 验收标准
-- [ ] Role、Git Task Grant、assignment epoch 和参数约束取交集。
-- [ ] 策略缺失/异常默认拒绝。
-- [ ] 模拟接口无副作用且返回 reason/obligations。
+- [x] Role、Git Task Grant、assignment epoch 和参数约束取交集。
+- [x] 策略缺失/异常默认拒绝。
+- [x] 模拟接口无副作用且返回 reason/obligations。
 ## 不包含
 - Tool Adapter 执行。

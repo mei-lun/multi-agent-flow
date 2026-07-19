@@ -17,6 +17,7 @@
 from __future__ import annotations
 
 import os
+import json
 import platform
 import shutil
 import socket
@@ -37,8 +38,90 @@ __all__ = [
     "LocalEnvironmentInfoProvider",
     "NODE_ID_PATTERN",
     "RunnerRegistry",
+    "AssignmentModelSnapshot",
+    "LocalModelAliasResolver",
+    "ModelAliasResolver",
+    "ModelAssignmentSnapshot",
     "load_or_create_node_id",
 ]
+
+
+@dataclass(frozen=True)
+class AssignmentModelSnapshot:
+    """Node-local immutable resolution captured when an assignment starts.
+
+    Secret references are intentionally local-only and this object is never
+    included in the Git coordination manifest or task payload.
+    """
+
+    alias: str
+    connection_id: str
+    profile_id: str
+    secret_id: str
+    mapping_version: str
+
+
+class LocalModelAliasResolver:
+    """Resolve logical aliases from a node-local JSON mapping file."""
+
+    def __init__(self, mapping_path: Path) -> None:
+        self._path = mapping_path.resolve()
+
+    def aliases(self) -> list[str]:
+        return sorted(self._read_mapping())
+
+    def can_claim(self, required_aliases: list[str]) -> bool:
+        available = set(self.aliases())
+        return all(alias in available for alias in required_aliases)
+
+    def snapshot(self, alias: str) -> AssignmentModelSnapshot:
+        mapping = self._read_mapping()
+        if alias not in mapping:
+            raise KeyError(f"node does not provide model alias: {alias}")
+        item = mapping[alias]
+        return AssignmentModelSnapshot(
+            alias=alias,
+            connection_id=item["connection_id"],
+            profile_id=item["profile_id"],
+            secret_id=item["secret_id"],
+            mapping_version=str(item.get("mapping_version", "1")),
+        )
+
+    def _read_mapping(self) -> dict[str, dict[str, str]]:
+        try:
+            raw = json.loads(self._path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise ValueError("invalid local model mapping") from exc
+        aliases = raw.get("aliases") if isinstance(raw, dict) else None
+        if not isinstance(aliases, dict):
+            raise ValueError("model mapping must contain an aliases object")
+        result: dict[str, dict[str, str]] = {}
+        for alias, item in aliases.items():
+            if not isinstance(alias, str) or not alias or not isinstance(item, dict):
+                raise ValueError("invalid model alias entry")
+            values = {
+                key: item.get(key)
+                for key in ("connection_id", "profile_id", "secret_id")
+            }
+            if not all(isinstance(value, str) and value for value in values.values()):
+                raise ValueError(f"model alias {alias!r} is incomplete")
+            result[alias] = dict(item)
+        return result
+
+
+# Friendly names used by callers/tests; both refer to the same immutable
+# node-local mapping behavior.
+ModelAliasResolver = LocalModelAliasResolver
+ModelAssignmentSnapshot = AssignmentModelSnapshot
+
+
+def _manifest_model_aliases(path: Path) -> list[str]:
+    try:
+        raw = json.loads(path.resolve().read_text(encoding="utf-8"))
+        aliases = raw.get("aliases", {}) if isinstance(raw, dict) else {}
+        return sorted(item for item in aliases if isinstance(item, str))
+    except (OSError, json.JSONDecodeError):
+        return []
 
 _SCHEMA_VERSION: Final[int] = 1
 _MANIFEST_VERSION: Final[int] = 1
@@ -410,7 +493,8 @@ class RunnerRegistry:
             "display_name": display_name,
             "git_identity": git_identity,
             "capabilities": list(self.settings.labels),
-            "model_aliases": list(self.settings.model_aliases),
+            "model_aliases": list(self.settings.model_aliases)
+            or _manifest_model_aliases(self.settings.model_mapping_path),
             "docker_profiles": list(self.settings.docker_profiles),
             "capacity": self.settings.max_concurrency,
             "status": self.manifest_status,

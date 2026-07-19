@@ -29,7 +29,9 @@ export async function request<T>(path: string, init: RequestInit = {}, timeoutMs
     if (text) { try { body = JSON.parse(text) as ApiErrorBody & T; } catch { body = text as ApiErrorBody & T; } }
     if (!response.ok) {
       const data = body as ApiErrorBody;
-      const message = data.message ?? data.detail ?? `Request failed (${response.status})`;
+      const message = response.status === 409
+        ? `${data.message ?? data.detail ?? "资源已被其他用户更新"}。请刷新后重试。`
+        : data.message ?? data.detail ?? `Request failed (${response.status})`;
       throw new ApiError(message, response.status, data);
     }
     return body as T;

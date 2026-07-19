@@ -10,8 +10,8 @@
 ## 禁止改动
 - 未列出的文件、接口、数据库表、API 路径和 Git Schema。
 ## 验收标准
-- [ ] 快照包含 control commit、任务和节点。
-- [ ] 非 fast-forward 或 Schema 错误时不返回部分快照。
-- [ ] 读取不改变工作区文件。
+- [x] 快照包含 control commit、任务和节点。
+- [x] 非 fast-forward 或 Schema 错误时不返回部分快照。
+- [x] 读取不改变工作区文件。
 ## 不包含
 - SQLite 投影。

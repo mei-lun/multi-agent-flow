@@ -10,8 +10,8 @@
 ## 禁止改动
 - 未列出的文件、接口、数据库表、API 路径和 Git Schema。
 ## 验收标准
-- [ ] 相同 workflow hash 编译等价图。
-- [ ] Graph State 只存小字段和引用。
-- [ ] 重启可从 checkpoint 恢复。
+- [x] 相同 workflow hash 编译等价图。
+- [x] Graph State 只存小字段和引用。
+- [x] 重启可从 checkpoint 恢复。
 ## 不包含
 - 远程任务执行。

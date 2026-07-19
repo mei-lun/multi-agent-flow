@@ -25,6 +25,9 @@ actor_id → ActorContext 构建：service 注入 ``SqliteIamRepository`` 查询
 
 from __future__ import annotations
 
+import hashlib
+import inspect
+import json
 import uuid
 from datetime import datetime, timezone
 from typing import Protocol
@@ -34,9 +37,11 @@ from maf_contracts.events import ActorRef, DomainEvent
 from maf_domain.errors import (
     AlreadyExistsError,
     ArgumentError,
+    IdempotencyConflictError,
     NotFoundError,
     PermissionDeniedError,
     VersionConflictError,
+    ValidationError,
 )
 from maf_policy import CasbinPermissionService
 
@@ -49,6 +54,7 @@ from .repository import (
     MemberRecord,
     ProjectRecord,
     SqliteProjectRepository,
+    init_project_extensions_schema,
     member_record_to_view,
     project_record_to_view,
 )
@@ -58,6 +64,10 @@ from .schemas import (
     ProjectPage,
     ProjectStatus,
     ProjectView,
+    AddProjectInputRequest,
+    ProjectInputView,
+    CreateChangeRequest,
+    ChangeRequestView,
 )
 
 # --------------------------------------------------------------------------- #
@@ -243,6 +253,9 @@ class ProjectApplicationServiceImpl:
         project_repository: SqliteProjectRepository | None = None,
         permission_service: CasbinPermissionService | None = None,
         clock: _SystemClock | None = None,
+        artifact_source: object | None = None,
+        run_source: object | None = None,
+        inbox_service: object | None = None,
     ) -> None:
         self._database: Database = database
         self._organization_id: str = organization_id
@@ -254,6 +267,20 @@ class ProjectApplicationServiceImpl:
             permission_service or CasbinPermissionService()
         )
         self._clock: _SystemClock = clock or _SystemClock()
+        self._artifact_source = artifact_source
+        self._run_source = run_source
+        self._inbox_service = inbox_service
+
+    @staticmethod
+    async def _call(source: object | None, names: tuple[str, ...], *args: object) -> object | None:
+        if source is None:
+            return None
+        for name in names:
+            method = getattr(source, name, None)
+            if method is not None:
+                value = method(*args)
+                return await value if inspect.isawaitable(value) else value
+        return None
 
     # ------------------------------------------------------------------ #
     # 内部：actor_id → ActorContext
@@ -861,6 +888,135 @@ class ProjectApplicationServiceImpl:
             )
         assert updated is not None
         return member_record_to_view(updated)
+
+    async def get_project_for_run(self, project_id: str) -> ProjectView | None:
+        """Internal read used by RunService; archived rows remain visible for rejection."""
+        async with self._database.read_connection() as conn:
+            record = await self._project_repository.get_project_include_deleted(conn, project_id)
+        return project_record_to_view(record) if record and record.deleted_at is None else None
+
+    async def get_input_version(self, input_id: str) -> ProjectInputView | None:
+        async with self._database.read_connection() as conn:
+            await init_project_extensions_schema(conn)
+            return await self._project_repository.get_input_version(conn, input_id)
+
+    async def add_input_version(
+        self, project_id: str, request: AddProjectInputRequest, *, actor_id: str
+    ) -> ProjectInputView:
+        """Append one immutable project input version with project-scoped idempotency."""
+        if not request.get("idempotency_key"):
+            raise ArgumentError("idempotency_key 不能为空")
+        request_hash = hashlib.sha256(
+            json.dumps(request, sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest()
+        artifact = await self._call(
+            self._artifact_source, ("get_artifact_version", "get_version", "get"),
+            request["upload_artifact_version_id"],
+        )
+        if not isinstance(artifact, dict):
+            raise ValidationError("Artifact 不存在或不可见")
+        if artifact.get("project_id") != project_id or artifact.get("status", "COMPLETE") not in {"COMPLETE", "READY", "PUBLISHED"}:
+            raise ValidationError("Artifact 必须属于项目且上传完整")
+        iso = _ensure_iso(self._clock.now())
+        async with SqliteUnitOfWork(self._database) as uow:
+            await init_project_extensions_schema(uow.connection)
+            actor = await self._build_actor(uow.connection, actor_id)
+            await self._permission_service.require(actor, "write", "projects")
+            project = await self._project_repository.get_project(uow.connection, project_id)
+            if project is None:
+                raise NotFoundError(f"项目不存在: {project_id}")
+            existing = await self._project_repository.get_input_by_idempotency_key(
+                uow.connection, project_id, request["idempotency_key"]
+            )
+            if existing is not None:
+                if existing[1] != request_hash:
+                    raise IdempotencyConflictError("相同幂等键对应不同输入")
+                await uow.rollback()
+                return existing[0]
+            item: ProjectInputView = {
+                "id": str(uuid.uuid4()), "project_id": project_id,
+                "version": await self._project_repository.next_input_version(uow.connection, project_id),
+                "name": request["name"].strip(), "content_type": request["content_type"],
+                "artifact_version_id": request["upload_artifact_version_id"],
+                "change_summary": request["change_summary"], "created_at": iso,
+            }
+            await self._project_repository.append_input_version(
+                uow.connection, item=item, idempotency_key=request["idempotency_key"],
+                request_hash=request_hash,
+            )
+            await self._append_event(
+                uow.connection, event_type="project.input_version_added",
+                aggregate_type="project_input", aggregate_id=item["id"], actor_id=actor_id,
+                project_id=project_id, payload={"version": item["version"], "artifact_version_id": item["artifact_version_id"]},
+            )
+            await uow.commit()
+            return item
+
+    async def create_change_request(
+        self, project_id: str, request: CreateChangeRequest, *, actor_id: str
+    ) -> ChangeRequestView:
+        """Record a request without touching checkpoint/control and create approval inbox work."""
+        if not request.get("idempotency_key"):
+            raise ArgumentError("idempotency_key 不能为空")
+        request_hash = hashlib.sha256(
+            json.dumps(request, sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest()
+        run = await self._call(self._run_source, ("get_run",), request["run_id"])
+        if not isinstance(run, dict) or run.get("project_id") != project_id:
+            raise ValidationError("只能为本项目 Run 创建变更请求")
+        if run.get("status") in {"COMPLETED", "FAILED", "CANCELLED"}:
+            raise ValidationError("终态 Run 不能创建变更请求")
+        iso = _ensure_iso(self._clock.now())
+        async with SqliteUnitOfWork(self._database) as uow:
+            await init_project_extensions_schema(uow.connection)
+            actor = await self._build_actor(uow.connection, actor_id)
+            await self._permission_service.require(actor, "write", "projects")
+            if await self._project_repository.get_project(uow.connection, project_id) is None:
+                raise NotFoundError(f"项目不存在: {project_id}")
+            existing = await self._project_repository.get_change_request_by_key(
+                uow.connection, project_id, request["idempotency_key"]
+            )
+            if existing is not None:
+                if existing[1] != request_hash:
+                    raise IdempotencyConflictError("相同幂等键对应不同变更请求")
+                await uow.rollback()
+                return existing[0]
+            item: ChangeRequestView = {
+                "id": str(uuid.uuid4()), "project_id": project_id, "run_id": request["run_id"],
+                "status": "PENDING", "title": request["title"].strip(),
+                "description": request["description"],
+                "affected_requirement_ids": sorted(set(request["affected_requirement_ids"])),
+                "requested_action": request["requested_action"], "inbox_item_id": None,
+                "created_at": iso,
+            }
+            await self._project_repository.insert_change_request(
+                uow.connection, item=item, idempotency_key=request["idempotency_key"], request_hash=request_hash
+            )
+            await self._append_event(
+                uow.connection, event_type="project.change_requested", aggregate_type="change_request",
+                aggregate_id=item["id"], actor_id=actor_id, project_id=project_id,
+                payload={"run_id": item["run_id"], "requested_action": item["requested_action"]},
+            )
+            await uow.commit()
+        if self._inbox_service is not None:
+            create = getattr(self._inbox_service, "create")
+            inbox = create(
+                {"project_id": project_id, "title": item["title"], "description": item["description"],
+                 "item_type": "CHANGE_REQUEST", "artifact_id": None, "review_id": None,
+                 "assigned_to": None, "priority": "HIGH",
+                 "metadata": {"change_request_id": item["id"], "run_id": item["run_id"],
+                              "requested_action": item["requested_action"]}}, actor_id=actor_id,
+            )
+            if inspect.isawaitable(inbox):
+                inbox = await inbox
+            if isinstance(inbox, dict):
+                item["inbox_item_id"] = str(inbox.get("id"))
+                async with SqliteUnitOfWork(self._database) as uow:
+                    await self._project_repository.set_change_request_inbox(
+                        uow.connection, item["id"], item["inbox_item_id"]
+                    )
+                    await uow.commit()
+        return item
 
 
 __all__ = [
